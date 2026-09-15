@@ -133,7 +133,7 @@ pipeline {
                     retry(2) {
                         bat '''
                             @echo off
-                            python scripts\\review.py
+                            python utils\\review.py
                         '''
                     }
                 }
