@@ -140,24 +140,6 @@ pipeline {
             }
         }
 
-        stage('Review with DeepSeek') {
-            steps {
-                withCredentials([
-                    string(
-                        credentialsId: 'deepseek-api-key',
-                        variable: 'DEEPSEEK_API_KEY'
-                    )
-                ]) {
-                    retry(2) {
-                        bat '''
-                            @echo off
-                            python review.py
-                        '''
-                    }
-                }
-            }
-        }
-
         stage('Publish review to GitLab MR') {
             when {
                 expression {
