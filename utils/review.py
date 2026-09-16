@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -89,6 +90,15 @@ def extract_json_object(raw):
 
 
 def normalize_review(value):
+    if (
+        not isinstance(value.get("summary"), str)
+        or not value["summary"].strip()
+        or not isinstance(value.get("change_intent"), str)
+        or not isinstance(value.get("changes"), list)
+        or not isinstance(value.get("comments"), list)
+    ):
+        raise ValueError("AI output is missing required review fields.")
+
     summary = str(value.get("summary", "")).strip()
     change_intent = str(value.get("change_intent", "")).strip()
 
@@ -302,9 +312,8 @@ def gitlab_api(base_url, token, method, path, form=None):
             body = response.read().decode("utf-8")
             return json.loads(body) if body else None
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(
-            f"GitLab API {method} {path} returned HTTP {exc.code}: {detail}"
+            f"GitLab API {method} {path} returned HTTP {exc.code}."
         ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Cannot connect to GitLab API: {exc.reason}") from exc
@@ -497,18 +506,90 @@ def post_summary_note(base_url, token, project_id, mr_iid, body):
     )
 
 
-def main():
+def publishing_enabled():
+    return os.environ.get("PUBLISH_COMMENT", "false").lower() in {
+        "1", "true", "yes"
+    }
+
+
+def publishing_context():
+    repository_url = required_env("EFFECTIVE_REPOSITORY_URL")
+    project_id = required_env("EFFECTIVE_PROJECT_ID")
+    mr_iid = required_env("EFFECTIVE_MR_IID")
+    token = required_env("GITLAB_API_TOKEN")
+    return gitlab_base_url(repository_url), token, project_id, mr_iid
+
+
+def update_mr_labels(base_url, token, project_id, mr_iid, add, remove):
+    project = urllib.parse.quote(str(project_id), safe="")
+    return gitlab_api(
+        base_url,
+        token,
+        "PUT",
+        f"/projects/{project}/merge_requests/{mr_iid}",
+        {"add_labels": ",".join(add), "remove_labels": ",".join(remove)},
+    )
+
+
+def announce_review_start():
+    if not publishing_enabled():
+        print("Publishing disabled; start notification skipped.")
+        return
+    base_url, token, project_id, mr_iid = publishing_context()
+    post_summary_note(base_url, token, project_id, mr_iid, "已触发AI代码审核")
+    update_mr_labels(
+        base_url, token, project_id, mr_iid,
+        add=["ai_code_reviewing"],
+        remove=["ai_code_review_done", "ai_code_review_failed"],
+    )
+    print("Review start note posted and reviewing label applied.")
+
+
+def report_review_failure():
+    if not publishing_enabled():
+        print("Publishing disabled; failure notification skipped.")
+        return
+    base_url, token, project_id, mr_iid = publishing_context()
+    stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
+    if stage not in {"发送开始通知", "生成 MR diff", "AI 审查或结果发布"}:
+        stage = "未知阶段"
+    build_url = os.environ.get("BUILD_URL", "").strip()
+    parsed_url = urllib.parse.urlparse(build_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        build_url = "请查看 Jenkins 构建记录"
+    body = (
+        "AI代码审核失败。\n\n"
+        f"- 失败阶段：{stage}\n"
+        f"- Jenkins 构建：{build_url}\n"
+        "- 详细错误请查看 Jenkins 控制台日志；此处不公开接口响应或凭证。"
+    )
+
+    failures = []
+    try:
+        update_mr_labels(
+            base_url, token, project_id, mr_iid,
+            add=["ai_code_review_failed"],
+            remove=["ai_code_reviewing", "ai_code_review_done"],
+        )
+    except RuntimeError as exc:
+        failures.append(f"label update: {exc}")
+    try:
+        post_summary_note(base_url, token, project_id, mr_iid, body)
+    except RuntimeError as exc:
+        failures.append(f"failure note: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    print("Failure label and sanitized failure note published.")
+
+
+def run_review():
     deepseek_api_key = required_env("DEEPSEEK_API_KEY")
     repository_url = required_env("EFFECTIVE_REPOSITORY_URL")
     source_branch = os.environ.get("EFFECTIVE_SOURCE_BRANCH", "unknown")
     target_branch = os.environ.get("EFFECTIVE_TARGET_BRANCH", "unknown")
     mr_iid = os.environ.get("EFFECTIVE_MR_IID", "").strip()
     project_id = os.environ.get("EFFECTIVE_PROJECT_ID", "").strip()
-    publish = os.environ.get("PUBLISH_COMMENT", "false").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    publish = publishing_enabled()
 
     full_diff = read_text("mr.diff")
     truncated = len(full_diff) > MAX_DIFF_CHARS
@@ -595,28 +676,12 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
 
     write_text("review-raw.txt", raw_review.strip() + "\n")
 
-    parse_error = None
     try:
         review = normalize_review(extract_json_object(raw_review))
     except (ValueError, json.JSONDecodeError) as exc:
-        parse_error = str(exc)
-        review = {
-            "summary": "AI 返回内容无法解析为约定的 JSON，未发布行级评论。",
-            "change_intent": "无法从非结构化输出中可靠提取修改意图。",
-            "changes": [],
-            "comments": [
-                {
-                    "title": "AI 输出格式异常",
-                    "path": "",
-                    "line": 0,
-                    "side": "new",
-                    "severity": "medium",
-                    "problem": "AI 没有返回符合约定结构的 JSON。",
-                    "risk": "无法验证文件路径和行号，不能安全发布行级评论。",
-                    "suggestion": "查看 Jenkins 归档中的 review-raw.txt，并重新执行审查。",
-                }
-            ],
-        }
+        raise RuntimeError(
+            "AI output cannot be used as review JSON; see review-raw.txt."
+        ) from exc
 
     write_json("review-result.json", review)
 
@@ -624,12 +689,7 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
     fallback_items = []
     posted_count = 0
 
-    if parse_error:
-        fallback_items.append(
-            {"comment": review["comments"][0], "reason": parse_error}
-        )
-
-    if publish and not parse_error:
+    if publish:
         gitlab_token = required_env("GITLAB_API_TOKEN")
         if not project_id or not mr_iid:
             raise RuntimeError("Project ID and MR IID are required for publishing.")
@@ -680,7 +740,7 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
                     }
                 )
 
-    elif not publish and not parse_error:
+    else:
         for comment in review["comments"]:
             position = changed_positions.get(
                 (comment["path"], comment["side"], comment["line"])
@@ -707,6 +767,11 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
         post_summary_note(
             base_url, gitlab_token, project_id, mr_iid, summary_note
         )
+        update_mr_labels(
+            base_url, gitlab_token, project_id, mr_iid,
+            add=["ai_code_review_done"],
+            remove=["ai_code_reviewing", "ai_code_review_failed"],
+        )
 
     print(
         "Review finished: "
@@ -718,4 +783,12 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
 
 
 if __name__ == "__main__":
-    main()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "--review"
+    if mode == "--start":
+        announce_review_start()
+    elif mode == "--review":
+        run_review()
+    elif mode == "--fail":
+        report_review_failure()
+    else:
+        raise SystemExit("Usage: review.py [--start|--review|--fail]")
