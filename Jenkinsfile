@@ -25,25 +25,25 @@ pipeline {
         string(
             name: 'MANUAL_PROJECT_ID',
             defaultValue: '',
-            description: '仅手动构建备用；第二阶段 GitLab API 会使用此项目 ID。'
+            description: '仅手动构建备用；填写 GitLab 项目 ID。'
         )
         booleanParam(
             name: 'PUBLISH_COMMENT',
             defaultValue: true,
-            description: 'Webhook 构建时，是否向对应 GitLab MR 回写普通审查评论。'
+            description: '是否向对应 GitLab MR 发布行级评论和汇总评论。'
         )
     }
 
     options {
         skipDefaultCheckout(true)
         timestamps()
+        disableConcurrentBuilds()
     }
 
     stages {
         stage('Identify Merge Request') {
             steps {
                 script {
-                    // Webhook 信息优先；仅当手动构建时才使用 MANUAL_* 参数。
                     env.EFFECTIVE_REPOSITORY_URL =
                         env.gitlabSourceRepoHttpUrl?.trim() ?:
                         params.MANUAL_REPOSITORY_URL.trim()
@@ -67,13 +67,15 @@ pipeline {
                     if (!env.EFFECTIVE_REPOSITORY_URL) {
                         error('未获取仓库地址。请通过 GitLab MR Webhook 触发，或填写 MANUAL_REPOSITORY_URL。')
                     }
-
                     if (!env.EFFECTIVE_SOURCE_BRANCH) {
                         error('未获取来源分支。请通过 GitLab MR Webhook 触发，或填写 MANUAL_SOURCE_BRANCH。')
                     }
-
                     if (!env.EFFECTIVE_TARGET_BRANCH) {
                         error('未获取目标分支。请通过 GitLab MR Webhook 触发，或填写 MANUAL_TARGET_BRANCH。')
+                    }
+                    if (params.PUBLISH_COMMENT &&
+                        (!env.EFFECTIVE_PROJECT_ID || !env.EFFECTIVE_MR_IID)) {
+                        error('启用评论发布时，必须取得 GitLab Project ID 和 MR IID。')
                     }
 
                     echo """
@@ -84,6 +86,7 @@ pipeline {
                         MR IID: ${env.EFFECTIVE_MR_IID ?: 'unknown'}
                         Source branch: ${env.EFFECTIVE_SOURCE_BRANCH}
                         Target branch: ${env.EFFECTIVE_TARGET_BRANCH}
+                        Publish comment: ${params.PUBLISH_COMMENT}
                     """.stripIndent()
                 }
             }
@@ -91,6 +94,7 @@ pipeline {
 
         stage('Checkout source branch') {
             steps {
+                deleteDir()
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: "*/${env.EFFECTIVE_SOURCE_BRANCH}"]],
@@ -106,66 +110,47 @@ pipeline {
             steps {
                 bat '''
                     @echo off
+                    setlocal
                     set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
 
+                    git rev-parse --verify "origin/%TARGET%" >nul 2>&1
+                    if errorlevel 1 (
+                        echo ERROR: Target branch origin/%TARGET% was not fetched.
+                        exit /b 1
+                    )
+
                     echo === Changed files ===
-                    git diff --name-status "origin/%TARGET%...HEAD"
+                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
+                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
 
                     echo === Diff summary ===
-                    git diff --stat "origin/%TARGET%...HEAD"
+                    git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
 
-                    git diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
+                    git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
+                    if errorlevel 1 exit /b 1
 
                     echo === Diff created ===
-                    dir mr.diff
+                    dir mr.diff changed-files.txt
                 '''
             }
         }
 
-        stage('Review with DeepSeek') {
+        stage('Review and publish') {
             steps {
                 withCredentials([
                     string(
                         credentialsId: 'deepseek-api-key',
                         variable: 'DEEPSEEK_API_KEY'
+                    ),
+                    string(
+                        credentialsId: 'gitlab-review-api',
+                        variable: 'GITLAB_API_TOKEN'
                     )
                 ]) {
-                    retry(2) {
-                        bat '''
-                            @echo off
-                            python utils\\review.py
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('Publish review to GitLab MR') {
-            when {
-                expression {
-                    return params.PUBLISH_COMMENT &&
-                        env.gitlabMergeRequestIid?.trim()
-                }
-            }
-
-            steps {
-                script {
-                    def review = readFile(file: 'review-result.md')
-
-                    def comment = """\
-## 🤖 AI 代码审查结果
-
-- Jenkins 构建：#${env.BUILD_NUMBER}
-- MR：!${env.EFFECTIVE_MR_IID}
-- 源分支：`${env.EFFECTIVE_SOURCE_BRANCH}`
-- 目标分支：`${env.EFFECTIVE_TARGET_BRANCH}`
-
----
-
-${review}
-""".stripIndent()
-
-                    addGitLabMRComment(comment: comment)
+                    bat '''
+                        @echo off
+                        python -u utils\review.py
+                    '''
                 }
             }
         }
@@ -173,7 +158,10 @@ ${review}
 
     post {
         always {
-            archiveArtifacts artifacts: 'mr.diff, review-result.md', allowEmptyArchive: true
+            archiveArtifacts(
+                artifacts: 'mr.diff, changed-files.txt, review-raw.txt, review-result.json, review-result.md',
+                allowEmptyArchive: true
+            )
         }
     }
 }
