@@ -30,7 +30,7 @@ pipeline {
         booleanParam(
             name: 'PUBLISH_COMMENT',
             defaultValue: true,
-            description: '是否向对应 GitLab MR 发布行级评论和汇总评论。'
+            description: '是否向对应 GitLab MR 发布开始通知、审查评论和状态标签。'
         )
     }
 
@@ -106,8 +106,30 @@ pipeline {
             }
         }
 
+        stage('Announce review start') {
+            when { expression { params.PUBLISH_COMMENT } }
+            steps {
+                script {
+                    env.REVIEW_FAILURE_STAGE = '发送开始通知'
+                    env.REVIEW_NOTICE_ATTEMPTED = 'true'
+                }
+                withCredentials([
+                    string(
+                        credentialsId: 'gitlab-review-api',
+                        variable: 'GITLAB_API_TOKEN'
+                    )
+                ]) {
+                    bat '''
+                        @echo off
+                        python -u utils/review.py --start
+                    '''
+                }
+            }
+        }
+
         stage('Generate MR diff') {
             steps {
+                script { env.REVIEW_FAILURE_STAGE = '生成 MR diff' }
                 bat '''
                     @echo off
                     setlocal
@@ -137,6 +159,7 @@ pipeline {
 
         stage('Review and publish') {
             steps {
+                script { env.REVIEW_FAILURE_STAGE = 'AI 审查或结果发布' }
                 withCredentials([
                     string(
                         credentialsId: 'deepseek-api-key',
@@ -149,7 +172,7 @@ pipeline {
                 ]) {
                     bat '''
                         @echo off
-                        python -u utils/review.py
+                        python -u utils/review.py --review
                     '''
                 }
             }
@@ -157,7 +180,28 @@ pipeline {
     }
 
     post {
-        always {
+        unsuccessful {
+            script {
+                if (env.REVIEW_NOTICE_ATTEMPTED == 'true') {
+                    try {
+                        withCredentials([
+                            string(
+                                credentialsId: 'gitlab-review-api',
+                                variable: 'GITLAB_API_TOKEN'
+                            )
+                        ]) {
+                            bat '''
+                                @echo off
+                                python -u utils/review.py --fail
+                            '''
+                        }
+                    } catch (ignored) {
+                        echo '无法更新 GitLab 失败标签或通知；请查看本次 Jenkins 构建日志。'
+                    }
+                }
+            }
+        }
+        cleanup {
             archiveArtifacts(
                 artifacts: 'mr.diff, changed-files.txt, review-raw.txt, review-result.json, review-result.md',
                 allowEmptyArchive: true
