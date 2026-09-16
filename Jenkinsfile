@@ -149,7 +149,7 @@ pipeline {
                 ]) {
                     bat '''
                         @echo off
-                        python -u utils\review.py
+                        python -u utils/review.py
                     '''
                 }
             }
