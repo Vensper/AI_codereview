@@ -235,6 +235,59 @@ def parse_changed_lines(diff_text):
     return positions
 
 
+def number_diff_for_ai(diff_text):
+    """Annotate every hunk line with exact old/new line numbers for the model."""
+    output = []
+    old_line = None
+    new_line = None
+    in_hunk = False
+    hunk_pattern = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("diff --git "):
+            in_hunk = False
+            old_line = None
+            new_line = None
+            output.append(raw_line)
+            continue
+
+        match = hunk_pattern.match(raw_line)
+        if match:
+            old_line = int(match.group(1))
+            new_line = int(match.group(2))
+            in_hunk = True
+            output.append(raw_line)
+            continue
+
+        if not in_hunk or old_line is None or new_line is None:
+            output.append(raw_line)
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            output.append(
+                f"[old=-,new={new_line},kind=added] {raw_line}"
+            )
+            new_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            output.append(
+                f"[old={old_line},new=-,kind=deleted] {raw_line}"
+            )
+            old_line += 1
+        elif raw_line.startswith(" "):
+            output.append(
+                f"[old={old_line},new={new_line},kind=context] {raw_line}"
+            )
+            old_line += 1
+            new_line += 1
+        elif raw_line.startswith("\\"):
+            output.append(raw_line)
+        else:
+            in_hunk = False
+            output.append(raw_line)
+
+    return "\n".join(output)
+
+
 def gitlab_api(base_url, token, method, path, form=None):
     url = base_url.rstrip("/") + "/api/v4" + path
     data = None
@@ -459,7 +512,8 @@ def main():
 
     full_diff = read_text("mr.diff")
     truncated = len(full_diff) > MAX_DIFF_CHARS
-    diff_for_ai = full_diff[:MAX_DIFF_CHARS]
+    raw_diff_for_ai = full_diff[:MAX_DIFF_CHARS]
+    diff_for_ai = number_diff_for_ai(raw_diff_for_ai)
 
     system_prompt = r'''
 你是资深代码审查员。仅基于“当前 MR diff”审查，禁止报告不在本次 diff 中的问题。
@@ -493,15 +547,18 @@ def main():
 }
 
 硬性要求：
-1. 仅评论本次 diff 中以 + 或 - 标记的真实变更行。
-2. 新增行使用 side=new 和新文件行号；删除行使用 side=old 和旧文件行号。
-3. path 必须与 diff 路径完全一致，区分大小写，禁止改写路径。
-4. 无法确认准确路径、side 或行号的问题不要放入 comments，可在 summary 中概括。
-5. severity 只能是 low、medium、high。
-6. comments 最多 10 条，同一 path、side、line 只能保留一条。
-7. comments 按 high、medium、low 排序，同级按 path 和 line 排序。
-8. 不得输出 schema 以外字段，不得输出 null、注释或尾逗号。
-9. 没有问题时返回空 comments，但仍填写 summary、change_intent 和 changes。
+1. 每行前的定位标记由系统生成，格式为 [old=旧行号,new=新行号,kind=类型]。
+2. 仅评论 kind=added 或 kind=deleted 的真实变更行，禁止评论 kind=context 行。
+3. kind=added 必须使用 side=new，并直接复制标记中的 new 行号。
+4. kind=deleted 必须使用 side=old，并直接复制标记中的 old 行号。
+5. 禁止自行累计、推算或修正行号；必须逐字采用定位标记中的行号。
+6. path 必须与 diff 路径完全一致，区分大小写，禁止改写路径。
+7. 无法确认准确路径、side 或行号的问题不要放入 comments，可在 summary 中概括。
+8. severity 只能是 low、medium、high。
+9. comments 最多 10 条，同一 path、side、line 只能保留一条。
+10. comments 按 high、medium、low 排序，同级按 path 和 line 排序。
+11. 不得输出 schema 以外字段，不得输出 null、注释或尾逗号。
+12. 没有问题时返回空 comments，但仍填写 summary、change_intent 和 changes。
 '''.strip()
 
     user_prompt = f'''
@@ -511,9 +568,9 @@ MR: !{mr_iid or "unknown"}
 目标分支: {target_branch}
 Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "否"}
 
---- BEGIN DIFF ---
+--- BEGIN NUMBERED DIFF ---
 {diff_for_ai}
---- END DIFF ---
+--- END NUMBERED DIFF ---
 '''.strip()
 
     payload = {
