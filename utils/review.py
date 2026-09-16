@@ -386,8 +386,6 @@ def fallback_section(review, fallback_items):
         return ""
 
     lines = [
-        "---",
-        "",
         "## 无法行级定位的评审建议",
         "",
         "### 一、修改点分析",
@@ -464,7 +462,7 @@ def build_summary_note(review, fallback_items, posted_count, build_number):
     for comment in review["comments"]:
         counts[comment["severity"]] += 1
 
-    lines = [
+    summary_lines = [
         "## 🤖 AI 代码审查汇总",
         "",
         "| 风险等级 | 数量 |",
@@ -481,8 +479,10 @@ def build_summary_note(review, fallback_items, posted_count, build_number):
     ]
 
     fallback = fallback_section(review, fallback_items)
+    lines = []
     if fallback:
-        lines.extend(["", fallback])
+        lines.extend([fallback, "", "---", ""])
+    lines.extend(summary_lines)
     return "\n".join(lines).rstrip() + "\n"
 
 
