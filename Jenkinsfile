@@ -32,6 +32,11 @@ pipeline {
             defaultValue: true,
             description: '是否向对应 GitLab MR 发布开始通知、审查评论和状态标签。'
         )
+        booleanParam(
+            name: 'FORCE_REVIEW',
+            defaultValue: false,
+            description: '仅手动排障使用：即使当前 MR 提交已成功审查，仍强制重新审查。'
+        )
     }
 
     options {
@@ -44,6 +49,7 @@ pipeline {
         stage('Identify Merge Request') {
             steps {
                 script {
+                    env.REVIEW_SKIP = 'false'
                     env.EFFECTIVE_REPOSITORY_URL =
                         env.gitlabSourceRepoHttpUrl?.trim() ?:
                         params.MANUAL_REPOSITORY_URL.trim()
@@ -94,10 +100,8 @@ pipeline {
 
         stage('Checkout trusted reviewer') {
             steps {
-                // 清理上次构建留下的整个任务工作区；后面不再清理工作区根目录。
                 deleteDir()
                 dir('review-tool') {
-                    // 工具仓库地址和分支固定，不从 Webhook 或手动参数取值。
                     checkout([
                         $class: 'GitSCM',
                         branches: [[name: 'refs/heads/master']],
@@ -130,6 +134,23 @@ pipeline {
             }
         }
 
+        stage('Capture source revision') {
+            steps {
+                dir('mr-source') {
+                    script {
+                        env.EFFECTIVE_SOURCE_SHA = bat(
+                            script: '@echo off\r\ngit rev-parse HEAD',
+                            returnStdout: true
+                        ).trim()
+                        if (!(env.EFFECTIVE_SOURCE_SHA ==~ /[0-9a-fA-F]{40}/)) {
+                            error('无法取得 MR 源分支的 Git commit SHA。')
+                        }
+                        echo "Source SHA: ${env.EFFECTIVE_SOURCE_SHA}"
+                    }
+                }
+            }
+        }
+
         stage('Announce review start') {
             when { expression { params.PUBLISH_COMMENT } }
             steps {
@@ -149,11 +170,21 @@ pipeline {
                             python -u utils/review.py --start
                         '''
                     }
+                    script {
+                        if (fileExists('review-skip.flag')) {
+                            env.REVIEW_SKIP = 'true'
+                            currentBuild.description = "Skipped: MR commit ${env.EFFECTIVE_SOURCE_SHA.take(12)} already reviewed"
+                            echo 'Review deduplication: already completed, skip.'
+                        } else {
+                            echo 'Review deduplication: no completed review found.'
+                        }
+                    }
                 }
             }
         }
 
         stage('Generate MR diff') {
+            when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
                 script { env.REVIEW_FAILURE_STAGE = '生成 MR diff' }
                 dir('mr-source') {
@@ -162,28 +193,26 @@ pipeline {
                         setlocal
                         set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
 
-                        git rev-parse --verify "origin/%TARGET%" >nul 2>&1
-                        if errorlevel 1 (
-                            echo ERROR: Target branch origin/%TARGET% was not fetched.
-                            exit /b 1
-                        )
+                    git rev-parse --verify "origin/%TARGET%" >nul 2>&1
+                    if errorlevel 1 (
+                        echo ERROR: Target branch origin/%TARGET% was not fetched.
+                        exit /b 1
+                    )
 
-                        echo === Changed files ===
-                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
-                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
+                    echo === Changed files ===
+                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
+                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
 
-                        echo === Diff summary ===
-                        git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
+                    echo === Diff summary ===
+                    git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
 
-                        git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
-                        if errorlevel 1 exit /b 1
+                    git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
+                    if errorlevel 1 exit /b 1
 
                         echo === Diff created ===
                         dir mr.diff changed-files.txt
                     '''
                 }
-
-                // review.py 仍按相对路径读取 mr.diff；只把 diff 数据复制给可信工具。
                 bat '''
                     @echo off
                     copy /Y "mr-source\\mr.diff" "review-tool\\mr.diff" >nul
@@ -193,6 +222,7 @@ pipeline {
         }
 
         stage('Review and publish') {
+            when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
                 script { env.REVIEW_FAILURE_STAGE = 'AI 审查或结果发布' }
                 dir('review-tool') {
@@ -242,7 +272,7 @@ pipeline {
         }
         cleanup {
             archiveArtifacts(
-                artifacts: 'mr-source/mr.diff, mr-source/changed-files.txt, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+                artifacts: 'mr-source/mr.diff, mr-source/changed-files.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                 allowEmptyArchive: true
             )
         }

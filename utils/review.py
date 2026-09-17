@@ -12,6 +12,7 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-v4-flash"
 MAX_DIFF_CHARS = 60000
 MAX_COMMENTS = 10
+REVIEWER_VERSION = "v1"
 SEVERITIES = {"low", "medium", "high"}
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
@@ -531,18 +532,84 @@ def update_mr_labels(base_url, token, project_id, mr_iid, add, remove):
     )
 
 
+def review_done_marker(source_sha):
+    return f"<!-- AI_CODE_REVIEW_DONE:{REVIEWER_VERSION}:{source_sha.lower()} -->"
+
+
+def current_gitlab_user_id(base_url, token):
+    user = gitlab_api(base_url, token, "GET", "/user")
+    user_id = user.get("id") if isinstance(user, dict) else None
+    if not isinstance(user_id, int):
+        raise RuntimeError("GitLab API token cannot identify its current user.")
+    return user_id
+
+
+def has_completed_review(base_url, token, project_id, mr_iid, source_sha):
+    """Only trust a completion marker written by this API token's bot user."""
+    project = urllib.parse.quote(str(project_id), safe="")
+    notes = gitlab_api(
+        base_url,
+        token,
+        "GET",
+        f"/projects/{project}/merge_requests/{mr_iid}/notes?per_page=100&order_by=created_at&sort=desc",
+    )
+    if not isinstance(notes, list):
+        raise RuntimeError("GitLab returned an invalid merge request notes response.")
+
+    bot_user_id = current_gitlab_user_id(base_url, token)
+    marker = review_done_marker(source_sha)
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        author = note.get("author")
+        if not isinstance(author, dict) or author.get("id") != bot_user_id:
+            continue
+        if marker in str(note.get("body", "")):
+            return True
+    return False
+
+
+def update_mr_note(base_url, token, project_id, mr_iid, note_id, body):
+    project = urllib.parse.quote(str(project_id), safe="")
+    return gitlab_api(
+        base_url,
+        token,
+        "PUT",
+        f"/projects/{project}/merge_requests/{mr_iid}/notes/{note_id}",
+        {"body": body},
+    )
+
+
 def announce_review_start():
     if not publishing_enabled():
         print("Publishing disabled; start notification skipped.")
         return
     base_url, token, project_id, mr_iid = publishing_context()
+    source_sha = required_env("EFFECTIVE_SOURCE_SHA")
+    force_review = os.environ.get("FORCE_REVIEW", "false").lower() in {
+        "1", "true", "yes"
+    }
+
+    if not force_review and has_completed_review(
+        base_url, token, project_id, mr_iid, source_sha
+    ):
+        write_text("review-skip.flag", "already-completed\n")
+        print(
+            "Review deduplication: completed review exists for "
+            f"source SHA {source_sha}; skip requested."
+        )
+        return
+
     post_summary_note(base_url, token, project_id, mr_iid, "已触发AI代码审核")
     update_mr_labels(
         base_url, token, project_id, mr_iid,
         add=["ai_code_reviewing"],
         remove=["ai_code_review_done", "ai_code_review_failed"],
     )
-    print("Review start note posted and reviewing label applied.")
+    if force_review:
+        print("Review start note posted; FORCE_REVIEW=true, deduplication bypassed.")
+    else:
+        print("Review start note posted and reviewing label applied.")
 
 
 def report_review_failure():
@@ -585,6 +652,7 @@ def report_review_failure():
 def run_review():
     deepseek_api_key = required_env("DEEPSEEK_API_KEY")
     repository_url = required_env("EFFECTIVE_REPOSITORY_URL")
+    source_sha = required_env("EFFECTIVE_SOURCE_SHA").lower()
     source_branch = os.environ.get("EFFECTIVE_SOURCE_BRANCH", "unknown")
     target_branch = os.environ.get("EFFECTIVE_TARGET_BRANCH", "unknown")
     mr_iid = os.environ.get("EFFECTIVE_MR_IID", "").strip()
@@ -698,6 +766,11 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
         version = latest_mr_version(
             base_url, gitlab_token, project_id, mr_iid
         )
+        if str(version["head_sha"]).lower() != source_sha:
+            raise RuntimeError(
+                "Merge Request changed during this build; "
+                "its latest source SHA no longer matches the checked-out code."
+            )
 
         for comment in review["comments"]:
             position = changed_positions.get(
@@ -764,13 +837,28 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
     if publish:
         gitlab_token = required_env("GITLAB_API_TOKEN")
         base_url = gitlab_base_url(repository_url)
-        post_summary_note(
+        summary_note_response = post_summary_note(
             base_url, gitlab_token, project_id, mr_iid, summary_note
         )
         update_mr_labels(
             base_url, gitlab_token, project_id, mr_iid,
             add=["ai_code_review_done"],
             remove=["ai_code_reviewing", "ai_code_review_failed"],
+        )
+        note_id = (
+            summary_note_response.get("id")
+            if isinstance(summary_note_response, dict)
+            else None
+        )
+        if not isinstance(note_id, int):
+            raise RuntimeError("GitLab did not return an ID for the summary note.")
+        update_mr_note(
+            base_url,
+            gitlab_token,
+            project_id,
+            mr_iid,
+            note_id,
+            summary_note.rstrip() + "\n\n" + review_done_marker(source_sha) + "\n",
         )
 
     print(
