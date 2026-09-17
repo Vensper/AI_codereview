@@ -349,7 +349,183 @@ def latest_mr_version(base_url, token, project_id, mr_iid):
         "head_sha": latest["head_commit_sha"],
     }
 
-                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+
+
+
+class ApiDiffFallbackRequired(Exception):
+    """The API diff cannot safely be used; Jenkins must run local Git fallback."""
+
+
+def _as_bool(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _same_mr_version(first, second):
+    return all(
+        str(first[key]).lower() == str(second[key]).lower()
+        for key in ("base_sha", "start_sha", "head_sha")
+    )
+
+
+def _diff_path(path, is_dev_null):
+    if is_dev_null:
+        return "/dev/null"
+    return str(path).lstrip("/")
+
+
+def build_unified_diff_from_gitlab_changes(changes):
+    """Convert GitLab /changes entries into the unified diff format we parse."""
+    if not isinstance(changes, list) or not changes:
+        raise ApiDiffFallbackRequired("GitLab API returned no changed files.")
+
+    blocks = []
+    for item in changes:
+        if not isinstance(item, dict):
+            raise ApiDiffFallbackRequired(
+                "GitLab API returned an invalid changed-file entry."
+            )
+        if item.get("too_large") or item.get("collapsed"):
+            raise ApiDiffFallbackRequired(
+                "GitLab API omitted a large or collapsed file diff."
+            )
+
+        old_is_null = bool(item.get("new_file"))
+        new_is_null = bool(item.get("deleted_file"))
+        old_path = _diff_path(item.get("old_path", ""), old_is_null)
+        new_path = _diff_path(item.get("new_path", ""), new_is_null)
+        raw_diff = item.get("diff")
+
+        if not old_path or not new_path or not isinstance(raw_diff, str):
+            raise ApiDiffFallbackRequired(
+                "GitLab API returned an incomplete file diff."
+            )
+
+        left_name = old_path if old_path != "/dev/null" else new_path
+        right_name = new_path if new_path != "/dev/null" else old_path
+        blocks.extend(
+            [
+                f"diff --git a/{left_name} b/{right_name}",
+                f"--- {'/dev/null' if old_path == '/dev/null' else 'a/' + old_path}",
+                f"+++ {'/dev/null' if new_path == '/dev/null' else 'b/' + new_path}",
+            ]
+        )
+        if raw_diff:
+            blocks.extend(raw_diff.rstrip("\n").splitlines())
+
+    diff_text = "\n".join(blocks).rstrip() + "\n"
+    if not diff_text.strip():
+        raise ApiDiffFallbackRequired("GitLab API produced an empty unified diff.")
+    return diff_text
+
+
+def fetch_gitlab_api_diff(base_url, token, project_id, mr_iid, source_sha):
+    """Read the GitLab-recognized MR diff and pin it to this source revision."""
+    project = urllib.parse.quote(str(project_id), safe="")
+    version_before = latest_mr_version(base_url, token, project_id, mr_iid)
+    if str(version_before["head_sha"]).lower() != source_sha.lower():
+        raise RuntimeError(
+            "The checked-out source SHA differs from GitLab's latest MR source SHA; "
+            "stop instead of reviewing a stale revision."
+        )
+
+    response = gitlab_api(
+        base_url,
+        token,
+        "GET",
+        f"/projects/{project}/merge_requests/{mr_iid}/changes",
+    )
+    if not isinstance(response, dict):
+        raise ApiDiffFallbackRequired(
+            "GitLab API returned an invalid MR changes response."
+        )
+    if response.get("overflow"):
+        raise ApiDiffFallbackRequired("GitLab API reported diff overflow.")
+
+    diff_text = build_unified_diff_from_gitlab_changes(response.get("changes"))
+
+    version_after = latest_mr_version(base_url, token, project_id, mr_iid)
+    if not _same_mr_version(version_before, version_after):
+        raise RuntimeError(
+            "Merge Request changed while retrieving its API diff; "
+            "stop and wait for a new webhook."
+        )
+    return diff_text, version_after
+
+
+def write_diff_metadata(source, version=None, reason=None):
+    value = {
+        "source": source,
+        "source_sha": os.environ.get("EFFECTIVE_SOURCE_SHA", "").lower(),
+        "project_id": os.environ.get("EFFECTIVE_PROJECT_ID", ""),
+        "mr_iid": os.environ.get("EFFECTIVE_MR_IID", ""),
+    }
+    if version:
+        value["diff_refs"] = version
+    if reason:
+        value["fallback_reason"] = reason
+    write_json("diff-source.json", value)
+
+
+def prepare_api_diff():
+    """Exit 0 for API diff, 10 only when Jenkins should run local Git fallback."""
+    if _as_bool(os.environ.get("FORCE_LOCAL_GIT_DIFF", "false")):
+        reason = "FORCE_LOCAL_GIT_DIFF=true (manual fallback-path test)."
+        write_text("diff-api-fallback-reason.txt", reason + "\n")
+        print(reason)
+        return 10
+
+    repository_url = required_env("EFFECTIVE_REPOSITORY_URL")
+    project_id = required_env("EFFECTIVE_PROJECT_ID")
+    mr_iid = required_env("EFFECTIVE_MR_IID")
+    source_sha = required_env("EFFECTIVE_SOURCE_SHA").lower()
+    token = required_env("GITLAB_API_TOKEN")
+    base_url = gitlab_base_url(repository_url)
+
+    try:
+        diff_text, version = fetch_gitlab_api_diff(
+            base_url, token, project_id, mr_iid, source_sha
+        )
+    except ApiDiffFallbackRequired as exc:
+        reason = str(exc)
+        write_text("diff-api-fallback-reason.txt", reason + "\n")
+        print(f"GitLab API diff fallback required: {reason}")
+        return 10
+    except RuntimeError as exc:
+        message = str(exc)
+        if (
+            "differs from GitLab's latest" in message
+            or "changed while retrieving" in message
+        ):
+            raise
+        write_text("diff-api-fallback-reason.txt", message + "\n")
+        print(f"GitLab API request failed; local fallback required: {message}")
+        return 10
+
+    write_text("mr.diff", diff_text)
+    write_diff_metadata("gitlab_api", version=version)
+    print(
+        "MR diff prepared from GitLab API: "
+        f"head_sha={version['head_sha']}, bytes={len(diff_text.encode('utf-8'))}."
+    )
+    return 0
+
+
+def use_local_git_diff(path):
+    diff_text = read_text(path)
+    if not diff_text.strip():
+        raise RuntimeError("Local Git fallback produced an empty mr.diff.local.")
+    write_text("mr.diff", diff_text)
+
+    reason = "GitLab API diff was unavailable, incomplete, or deliberately bypassed."
+    reason_path = "diff-api-fallback-reason.txt"
+    if os.path.exists(reason_path):
+        reason = read_text(reason_path).strip() or reason
+
+    write_diff_metadata("local_git_fallback", reason=reason)
+    print(
+        "MR diff prepared from local Git fallback: "
+        f"bytes={len(diff_text.encode('utf-8'))}."
+    )
 
 
 def inline_body(comment):
@@ -621,10 +797,10 @@ def report_review_failure():
     base_url, token, project_id, mr_iid = publishing_context()
     stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
     if stage not in {
-    "发送开始通知",
-    "获取 GitLab MR diff",
-    "生成本地 Git 兜底 diff",
-    "AI 审查或结果发布",
+        "发送开始通知",
+        "获取 GitLab MR diff",
+        "生成本地 Git 兜底 diff",
+        "AI 审查或结果发布",
     }:
         stage = "未知阶段"
     build_url = os.environ.get("BUILD_URL", "").strip()
@@ -893,5 +1069,7 @@ if __name__ == "__main__":
         report_review_failure()
     else:
         raise SystemExit(
-            "Usage: review.py [--start|--prepare-api-diff|--use-local-diff <path>|--review|--fail]"
+            "Usage: review.py [--start|--prepare-api-diff|"
+            "--use-local-diff <path>|--review|--fail]"
         )
+
