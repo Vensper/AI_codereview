@@ -263,7 +263,7 @@ pipeline {
                 dir('review-tool') {
                     bat '''
                         @echo off
-                        python -u utils/review.py --use-local-diff "..\mr-source\mr.diff.local"
+                        python -u utils/review.py --use-local-diff "../mr-source/mr.diff.local"
                     '''
                 }
             }
