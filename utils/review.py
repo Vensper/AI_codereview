@@ -349,6 +349,8 @@ def latest_mr_version(base_url, token, project_id, mr_iid):
         "head_sha": latest["head_commit_sha"],
     }
 
+                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+
 
 def inline_body(comment):
     return (
@@ -618,7 +620,12 @@ def report_review_failure():
         return
     base_url, token, project_id, mr_iid = publishing_context()
     stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
-    if stage not in {"发送开始通知", "生成 MR diff", "AI 审查或结果发布"}:
+    if stage not in {
+    "发送开始通知",
+    "获取 GitLab MR diff",
+    "生成本地 Git 兜底 diff",
+    "AI 审查或结果发布",
+    }:
         stage = "未知阶段"
     build_url = os.environ.get("BUILD_URL", "").strip()
     parsed_url = urllib.parse.urlparse(build_url)
@@ -874,9 +881,17 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "--review"
     if mode == "--start":
         announce_review_start()
+    elif mode == "--prepare-api-diff":
+        raise SystemExit(prepare_api_diff())
+    elif mode == "--use-local-diff":
+        if len(sys.argv) != 3:
+            raise SystemExit("Usage: review.py --use-local-diff <path>")
+        use_local_git_diff(sys.argv[2])
     elif mode == "--review":
         run_review()
     elif mode == "--fail":
         report_review_failure()
     else:
-        raise SystemExit("Usage: review.py [--start|--review|--fail]")
+        raise SystemExit(
+            "Usage: review.py [--start|--prepare-api-diff|--use-local-diff <path>|--review|--fail]"
+        )

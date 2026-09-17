@@ -37,6 +37,11 @@ pipeline {
             defaultValue: false,
             description: '仅手动排障使用：即使当前 MR 提交已成功审查，仍强制重新审查。'
         )
+        booleanParam(
+            name: 'FORCE_LOCAL_GIT_DIFF',
+            defaultValue: false,
+            description: '仅测试用：跳过 GitLab API diff，验证本地 Git diff 兜底路径。正式 Webhook 构建保持 false。'
+        )
     }
 
     options {
@@ -183,41 +188,84 @@ pipeline {
             }
         }
 
-        stage('Generate MR diff') {
+        stage('Fetch MR diff from GitLab API') {
             when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
-                script { env.REVIEW_FAILURE_STAGE = '生成 MR diff' }
+                script {
+                    env.REVIEW_FAILURE_STAGE = '获取 GitLab MR diff'
+                    env.DIFF_FALLBACK_REQUIRED = 'false'
+                    env.DIFF_SOURCE = ''
+
+                    int apiStatus
+                    dir('review-tool') {
+                        withCredentials([
+                            string(
+                                credentialsId: 'gitlab-review-api',
+                                variable: 'GITLAB_API_TOKEN'
+                            )
+                        ]) {
+                            apiStatus = bat(
+                                returnStatus: true,
+                                script: '''
+                                    @echo off
+                                    python -u utils/review.py --prepare-api-diff
+                                '''
+                            )
+                        }
+                    }
+
+                    if (apiStatus == 0) {
+                        env.DIFF_SOURCE = 'gitlab_api'
+                        echo 'MR diff source: GitLab API.'
+                    } else if (apiStatus == 10) {
+                        env.DIFF_SOURCE = 'local_git_fallback'
+                        env.DIFF_FALLBACK_REQUIRED = 'true'
+                        echo 'GitLab API diff is unavailable or incomplete; local Git fallback will be used.'
+                    } else {
+                        error("GitLab API diff preparation failed with exit code ${apiStatus}.")
+                    }
+                }
+            }
+        }
+
+        stage('Generate local Git diff fallback') {
+            when {
+                allOf {
+                    expression { env.REVIEW_SKIP != 'true' }
+                    expression { env.DIFF_FALLBACK_REQUIRED == 'true' }
+                }
+            }
+            steps {
+                script { env.REVIEW_FAILURE_STAGE = '生成本地 Git 兜底 diff' }
                 dir('mr-source') {
                     bat '''
                         @echo off
                         setlocal
                         set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
 
-                    git rev-parse --verify "origin/%TARGET%" >nul 2>&1
-                    if errorlevel 1 (
-                        echo ERROR: Target branch origin/%TARGET% was not fetched.
-                        exit /b 1
-                    )
+                        git rev-parse --verify "origin/%TARGET%" >nul 2>&1
+                        if errorlevel 1 (
+                            echo ERROR: Target branch origin/%TARGET% was not fetched.
+                            exit /b 1
+                        )
 
-                    echo === Changed files ===
-                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
-                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
+                        echo === Local Git fallback: changed files ===
+                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
+                        if errorlevel 1 exit /b 1
 
-                    echo === Diff summary ===
-                    git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
+                        echo === Local Git fallback: diff summary ===
+                        git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
 
-                    git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
-                    if errorlevel 1 exit /b 1
-
-                        echo === Diff created ===
-                        dir mr.diff changed-files.txt
+                        git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff.local
+                        if errorlevel 1 exit /b 1
                     '''
                 }
-                bat '''
-                    @echo off
-                    copy /Y "mr-source\\mr.diff" "review-tool\\mr.diff" >nul
-                    if errorlevel 1 exit /b 1
-                '''
+                dir('review-tool') {
+                    bat '''
+                        @echo off
+                        python -u utils/review.py --use-local-diff "..\\mr-source\\mr.diff.local"
+                    '''
+                }
             }
         }
 
@@ -272,7 +320,7 @@ pipeline {
         }
         cleanup {
             archiveArtifacts(
-                artifacts: 'mr-source/mr.diff, mr-source/changed-files.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                 allowEmptyArchive: true
             )
         }
