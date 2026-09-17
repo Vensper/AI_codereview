@@ -92,17 +92,41 @@ pipeline {
             }
         }
 
+        stage('Checkout trusted reviewer') {
+            steps {
+                // 清理上次构建留下的整个任务工作区；后面不再清理工作区根目录。
+                deleteDir()
+                dir('review-tool') {
+                    // 工具仓库地址和分支固定，不从 Webhook 或手动参数取值。
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: 'refs/heads/master']],
+                        userRemoteConfigs: [[
+                            url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
+                            credentialsId: 'gitlab-project-read'
+                        ]]
+                    ])
+                    script {
+                        if (!fileExists('utils/review.py')) {
+                            error('受保护的 master 中找不到 utils/review.py。')
+                        }
+                    }
+                }
+            }
+        }
+
         stage('Checkout source branch') {
             steps {
-                deleteDir()
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: "*/${env.EFFECTIVE_SOURCE_BRANCH}"]],
-                    userRemoteConfigs: [[
-                        url: env.EFFECTIVE_REPOSITORY_URL,
-                        credentialsId: 'gitlab-project-read'
-                    ]]
-                ])
+                dir('mr-source') {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "refs/heads/${env.EFFECTIVE_SOURCE_BRANCH}"]],
+                        userRemoteConfigs: [[
+                            url: env.EFFECTIVE_REPOSITORY_URL,
+                            credentialsId: 'gitlab-project-read'
+                        ]]
+                    ])
+                }
             }
         }
 
@@ -113,16 +137,18 @@ pipeline {
                     env.REVIEW_FAILURE_STAGE = '发送开始通知'
                     env.REVIEW_NOTICE_ATTEMPTED = 'true'
                 }
-                withCredentials([
-                    string(
-                        credentialsId: 'gitlab-review-api',
-                        variable: 'GITLAB_API_TOKEN'
-                    )
-                ]) {
-                    bat '''
-                        @echo off
-                        python -u utils/review.py --start
-                    '''
+                dir('review-tool') {
+                    withCredentials([
+                        string(
+                            credentialsId: 'gitlab-review-api',
+                            variable: 'GITLAB_API_TOKEN'
+                        )
+                    ]) {
+                        bat '''
+                            @echo off
+                            python -u utils/review.py --start
+                        '''
+                    }
                 }
             }
         }
@@ -130,29 +156,38 @@ pipeline {
         stage('Generate MR diff') {
             steps {
                 script { env.REVIEW_FAILURE_STAGE = '生成 MR diff' }
+                dir('mr-source') {
+                    bat '''
+                        @echo off
+                        setlocal
+                        set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
+
+                        git rev-parse --verify "origin/%TARGET%" >nul 2>&1
+                        if errorlevel 1 (
+                            echo ERROR: Target branch origin/%TARGET% was not fetched.
+                            exit /b 1
+                        )
+
+                        echo === Changed files ===
+                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
+                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
+
+                        echo === Diff summary ===
+                        git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
+
+                        git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
+                        if errorlevel 1 exit /b 1
+
+                        echo === Diff created ===
+                        dir mr.diff changed-files.txt
+                    '''
+                }
+
+                // review.py 仍按相对路径读取 mr.diff；只把 diff 数据复制给可信工具。
                 bat '''
                     @echo off
-                    setlocal
-                    set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
-
-                    git rev-parse --verify "origin/%TARGET%" >nul 2>&1
-                    if errorlevel 1 (
-                        echo ERROR: Target branch origin/%TARGET% was not fetched.
-                        exit /b 1
-                    )
-
-                    echo === Changed files ===
-                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD"
-                    git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
-
-                    echo === Diff summary ===
-                    git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
-
-                    git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff
+                    copy /Y "mr-source\\mr.diff" "review-tool\\mr.diff" >nul
                     if errorlevel 1 exit /b 1
-
-                    echo === Diff created ===
-                    dir mr.diff changed-files.txt
                 '''
             }
         }
@@ -160,20 +195,22 @@ pipeline {
         stage('Review and publish') {
             steps {
                 script { env.REVIEW_FAILURE_STAGE = 'AI 审查或结果发布' }
-                withCredentials([
-                    string(
-                        credentialsId: 'deepseek-api-key',
-                        variable: 'DEEPSEEK_API_KEY'
-                    ),
-                    string(
-                        credentialsId: 'gitlab-review-api',
-                        variable: 'GITLAB_API_TOKEN'
-                    )
-                ]) {
-                    bat '''
-                        @echo off
-                        python -u utils/review.py --review
-                    '''
+                dir('review-tool') {
+                    withCredentials([
+                        string(
+                            credentialsId: 'deepseek-api-key',
+                            variable: 'DEEPSEEK_API_KEY'
+                        ),
+                        string(
+                            credentialsId: 'gitlab-review-api',
+                            variable: 'GITLAB_API_TOKEN'
+                        )
+                    ]) {
+                        bat '''
+                            @echo off
+                            python -u utils/review.py --review
+                        '''
+                    }
                 }
             }
         }
@@ -184,16 +221,18 @@ pipeline {
             script {
                 if (env.REVIEW_NOTICE_ATTEMPTED == 'true') {
                     try {
-                        withCredentials([
-                            string(
-                                credentialsId: 'gitlab-review-api',
-                                variable: 'GITLAB_API_TOKEN'
-                            )
-                        ]) {
-                            bat '''
-                                @echo off
-                                python -u utils/review.py --fail
-                            '''
+                        dir('review-tool') {
+                            withCredentials([
+                                string(
+                                    credentialsId: 'gitlab-review-api',
+                                    variable: 'GITLAB_API_TOKEN'
+                                )
+                            ]) {
+                                bat '''
+                                    @echo off
+                                    python -u utils/review.py --fail
+                                '''
+                            }
                         }
                     } catch (ignored) {
                         echo '无法更新 GitLab 失败标签或通知；请查看本次 Jenkins 构建日志。'
@@ -203,7 +242,7 @@ pipeline {
         }
         cleanup {
             archiveArtifacts(
-                artifacts: 'mr.diff, changed-files.txt, review-raw.txt, review-result.json, review-result.md',
+                artifacts: 'mr-source/mr.diff, mr-source/changed-files.txt, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                 allowEmptyArchive: true
             )
         }
