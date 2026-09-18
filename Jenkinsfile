@@ -109,15 +109,15 @@ pipeline {
                 dir('review-tool') {
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: 'refs/heads/master']],
+                        branches: [[name: 'refs/heads/test-split-review-stages']],
                         userRemoteConfigs: [[
                             url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
                             credentialsId: 'gitlab-project-read'
                         ]]
                     ])
                     script {
-                        if (!fileExists('utils/review.py')) {
-                            error('受保护的 master 中找不到 utils/review.py。')
+                        if (!fileExists('utils/ai_review.py')) {
+                            error('受保护的 master 中找不到 utils/ai_review.py。')
                         }
                     }
                 }
@@ -172,7 +172,7 @@ pipeline {
                     ]) {
                         bat '''
                             @echo off
-                            python -u utils/review.py --start
+                            python -u -m utils.review_start
                         '''
                     }
                     script {
@@ -208,7 +208,7 @@ pipeline {
                                 returnStatus: true,
                                 script: '''
                                     @echo off
-                                    python -u utils/review.py --prepare-api-diff
+                                    python -u -m utils.prepare_api_diff
                                 '''
                             )
                         }
@@ -263,22 +263,38 @@ pipeline {
                 dir('review-tool') {
                     bat '''
                         @echo off
-                        python -u utils/review.py --use-local-diff "../mr-source/mr.diff.local"
+                        python -u -m utils.use_local_git_diff "../mr-source/mr.diff.local"
                     '''
                 }
             }
         }
 
-        stage('Review and publish') {
+        stage('Review with DeepSeek') {
             when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
-                script { env.REVIEW_FAILURE_STAGE = 'AI 审查或结果发布' }
+                script { env.REVIEW_FAILURE_STAGE = 'AI 审查' }
                 dir('review-tool') {
                     withCredentials([
                         string(
                             credentialsId: 'deepseek-api-key',
                             variable: 'DEEPSEEK_API_KEY'
-                        ),
+                        )
+                    ]) {
+                        bat '''
+                            @echo off
+                            python -u -m utils.ai_review
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Publish review results') {
+            when { expression { env.REVIEW_SKIP != 'true' } }
+            steps {
+                script { env.REVIEW_FAILURE_STAGE = '发布审查结果' }
+                dir('review-tool') {
+                    withCredentials([
                         string(
                             credentialsId: 'gitlab-review-api',
                             variable: 'GITLAB_API_TOKEN'
@@ -286,7 +302,7 @@ pipeline {
                     ]) {
                         bat '''
                             @echo off
-                            python -u utils/review.py --review
+                            python -u -m utils.publish_review
                         '''
                     }
                 }
@@ -308,7 +324,7 @@ pipeline {
                             ]) {
                                 bat '''
                                     @echo off
-                                    python -u utils/review.py --fail
+                                    python -u -m utils.report_review_failure
                                 '''
                             }
                         }
@@ -326,4 +342,3 @@ pipeline {
         }
     }
 }
-
