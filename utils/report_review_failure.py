@@ -18,6 +18,7 @@ def main():
     stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
     if stage not in {
         "发送开始通知",
+        "准备预合并工作区",
         "获取 GitLab MR diff",
         "生成本地 Git 兜底 diff",
         "AI 审查",

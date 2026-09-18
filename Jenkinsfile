@@ -132,7 +132,8 @@ pipeline {
                         branches: [[name: "refs/heads/${env.EFFECTIVE_SOURCE_BRANCH}"]],
                         userRemoteConfigs: [[
                             url: env.EFFECTIVE_REPOSITORY_URL,
-                            credentialsId: 'gitlab-project-read'
+                            credentialsId: 'gitlab-project-read',
+                            refspec: '+refs/heads/*:refs/remotes/origin/*'
                         ]]
                     ])
                 }
@@ -184,6 +185,19 @@ pipeline {
                             echo 'Review deduplication: no completed review found.'
                         }
                     }
+                }
+            }
+        }
+
+        stage('Prepare pre-merge workspace') {
+            when { expression { env.REVIEW_SKIP != 'true' } }
+            steps {
+                script { env.REVIEW_FAILURE_STAGE = '准备预合并工作区' }
+                dir('review-tool') {
+                    bat '''
+                        @echo off
+                        python -u -m utils.prepare_premerge "../mr-source" "../mr-premerge"
+                    '''
                 }
             }
         }
@@ -336,7 +350,7 @@ pipeline {
         }
         cleanup {
             archiveArtifacts(
-                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/premerge-result.json, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                 allowEmptyArchive: true
             )
         }
