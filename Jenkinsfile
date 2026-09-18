@@ -109,7 +109,7 @@ pipeline {
                 dir('review-tool') {
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: 'refs/heads/test-split-review-stages']],
+                        branches: [[name: 'refs/heads/master']],
                         userRemoteConfigs: [[
                             url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
                             credentialsId: 'gitlab-project-read'
