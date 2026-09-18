@@ -296,7 +296,7 @@ pipeline {
                     ]) {
                         bat '''
                             @echo off
-                            python -u -m utils.ai_review
+                            python -u -m utils.ai_review "../mr-premerge"
                         '''
                     }
                 }
@@ -350,7 +350,7 @@ pipeline {
         }
         cleanup {
             archiveArtifacts(
-                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/premerge-result.json, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+                artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/premerge-result.json, review-tool/ai-tool-trace.json, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                 allowEmptyArchive: true
             )
         }
