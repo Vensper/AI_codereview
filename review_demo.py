@@ -10,3 +10,6 @@ def calculate_average(total, count):
 def load_config(path):
     with open(path, "r", encoding="utf-8") as config_file:
         return json.load(config_file)
+
+
+// this is a comment
