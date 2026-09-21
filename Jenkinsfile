@@ -51,7 +51,7 @@ pipeline {
     }
 
     stages {
-        stage('Identify Merge Request') {
+        stage('checkout') {
             steps {
                 script {
                     env.REVIEW_SKIP = 'false'
@@ -100,11 +100,6 @@ pipeline {
                         Publish comment: ${params.PUBLISH_COMMENT}
                     """.stripIndent()
                 }
-            }
-        }
-
-        stage('Checkout trusted reviewer') {
-            steps {
                 deleteDir()
                 dir('review-tool') {
                     checkout([
@@ -121,11 +116,6 @@ pipeline {
                         }
                     }
                 }
-            }
-        }
-
-        stage('Checkout source branch') {
-            steps {
                 dir('mr-source') {
                     checkout([
                         $class: 'GitSCM',
@@ -137,11 +127,6 @@ pipeline {
                         ]]
                     ])
                 }
-            }
-        }
-
-        stage('Capture source revision') {
-            steps {
                 dir('mr-source') {
                     script {
                         env.EFFECTIVE_SOURCE_SHA = bat(
@@ -154,42 +139,37 @@ pipeline {
                         echo "Source SHA: ${env.EFFECTIVE_SOURCE_SHA}"
                     }
                 }
-            }
-        }
-
-        stage('Announce review start') {
-            when { expression { params.PUBLISH_COMMENT } }
-            steps {
                 script {
-                    env.REVIEW_FAILURE_STAGE = '发送开始通知'
-                    env.REVIEW_NOTICE_ATTEMPTED = 'true'
-                }
-                dir('review-tool') {
-                    withCredentials([
-                        string(
-                            credentialsId: 'gitlab-review-api',
-                            variable: 'GITLAB_API_TOKEN'
-                        )
-                    ]) {
-                        bat '''
-                            @echo off
-                            python -u -m utils.review_start
-                        '''
-                    }
-                    script {
-                        if (fileExists('review-skip.flag')) {
-                            env.REVIEW_SKIP = 'true'
-                            currentBuild.description = "Skipped: MR commit ${env.EFFECTIVE_SOURCE_SHA.take(12)} already reviewed"
-                            echo 'Review deduplication: already completed, skip.'
-                        } else {
-                            echo 'Review deduplication: no completed review found.'
+                    if (params.PUBLISH_COMMENT) {
+                        env.REVIEW_FAILURE_STAGE = '发送开始通知'
+                        env.REVIEW_NOTICE_ATTEMPTED = 'true'
+                        dir('review-tool') {
+                            withCredentials([
+                                string(
+                                    credentialsId: 'gitlab-review-api',
+                                    variable: 'GITLAB_API_TOKEN'
+                                )
+                            ]) {
+                                bat '''
+                                    @echo off
+                                    python -u -m utils.review_start
+                                '''
+                            }
+                            script {
+                                if (fileExists('review-skip.flag')) {
+                                    env.REVIEW_SKIP = 'true'
+                                    currentBuild.description = "Skipped: MR commit ${env.EFFECTIVE_SOURCE_SHA.take(12)} already reviewed"
+                                    echo 'Review deduplication: already completed, skip.'
+                                } else {
+                                    echo 'Review deduplication: no completed review found.'
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-
-        stage('Prepare pre-merge workspace') {
+        stage('ai review') {
             when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
                 script { env.REVIEW_FAILURE_STAGE = '准备预合并工作区' }
@@ -199,12 +179,6 @@ pipeline {
                         python -u -m utils.prepare_premerge "../mr-source" "../mr-premerge"
                     '''
                 }
-            }
-        }
-
-        stage('Fetch MR diff from GitLab API') {
-            when { expression { env.REVIEW_SKIP != 'true' } }
-            steps {
                 script {
                     env.REVIEW_FAILURE_STAGE = '获取 GitLab MR diff'
                     env.DIFF_FALLBACK_REQUIRED = 'false'
@@ -239,53 +213,40 @@ pipeline {
                         error("GitLab API diff preparation failed with exit code ${apiStatus}.")
                     }
                 }
-            }
-        }
+                script {
+                    if (env.DIFF_FALLBACK_REQUIRED == 'true') {
+                        env.REVIEW_FAILURE_STAGE = '生成本地 Git 兜底 diff'
+                        dir('mr-source') {
+                            bat '''
+                                @echo off
+                                setlocal
+                                set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
 
-        stage('Generate local Git diff fallback') {
-            when {
-                allOf {
-                    expression { env.REVIEW_SKIP != 'true' }
-                    expression { env.DIFF_FALLBACK_REQUIRED == 'true' }
+                                git rev-parse --verify "origin/%TARGET%" >nul 2>&1
+                                if errorlevel 1 (
+                                    echo ERROR: Target branch origin/%TARGET% was not fetched.
+                                    exit /b 1
+                                )
+
+                                echo === Local Git fallback: changed files ===
+                                git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
+                                if errorlevel 1 exit /b 1
+
+                                echo === Local Git fallback: diff summary ===
+                                git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
+
+                                git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff.local
+                                if errorlevel 1 exit /b 1
+                            '''
+                        }
+                        dir('review-tool') {
+                            bat '''
+                                @echo off
+                                python -u -m utils.use_local_git_diff "../mr-source/mr.diff.local"
+                            '''
+                        }
+                    }
                 }
-            }
-            steps {
-                script { env.REVIEW_FAILURE_STAGE = '生成本地 Git 兜底 diff' }
-                dir('mr-source') {
-                    bat '''
-                        @echo off
-                        setlocal
-                        set "TARGET=%EFFECTIVE_TARGET_BRANCH%"
-
-                        git rev-parse --verify "origin/%TARGET%" >nul 2>&1
-                        if errorlevel 1 (
-                            echo ERROR: Target branch origin/%TARGET% was not fetched.
-                            exit /b 1
-                        )
-
-                        echo === Local Git fallback: changed files ===
-                        git -c core.quotePath=false diff --name-status "origin/%TARGET%...HEAD" > changed-files.txt
-                        if errorlevel 1 exit /b 1
-
-                        echo === Local Git fallback: diff summary ===
-                        git -c core.quotePath=false diff --stat "origin/%TARGET%...HEAD"
-
-                        git -c core.quotePath=false diff --no-ext-diff --unified=3 "origin/%TARGET%...HEAD" > mr.diff.local
-                        if errorlevel 1 exit /b 1
-                    '''
-                }
-                dir('review-tool') {
-                    bat '''
-                        @echo off
-                        python -u -m utils.use_local_git_diff "../mr-source/mr.diff.local"
-                    '''
-                }
-            }
-        }
-
-        stage('Review with DeepSeek') {
-            when { expression { env.REVIEW_SKIP != 'true' } }
-            steps {
                 script { env.REVIEW_FAILURE_STAGE = 'AI 审查' }
                 dir('review-tool') {
                     withCredentials([
@@ -302,8 +263,7 @@ pipeline {
                 }
             }
         }
-
-        stage('Publish review results') {
+        stage('report') {
             when { expression { env.REVIEW_SKIP != 'true' } }
             steps {
                 script { env.REVIEW_FAILURE_STAGE = '发布审查结果' }
