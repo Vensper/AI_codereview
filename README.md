@@ -1,5 +1,6 @@
 # PH-SAO-QC-JJFA-2026
 
+//test 2026/9/21 17：15
 ## Jenkins 构建进度
 
 此流水线使用三个阶段作为 Jenkins 任务主页的进度列：`checkout`（识别 MR、检出、查重）、`ai review`（预合并、准备 diff、AI 审查）、`report`（发布 GitLab 评审结果）。每次构建占一行，构建编号、当前阶段的进度条和阶段用时由 Jenkins 的 **Pipeline: Stage View** 插件显示；运行中刷新任务主页即可查看更新。
