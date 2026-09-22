@@ -79,14 +79,22 @@ def run_review_loop(base_payload, deepseek_api_key):
     - 最多 MAX_TOOL_ROUNDS 个工具轮次、MAX_TOOL_CALLS 次总工具调用；
     - 模型返回 tool_calls 时保留完整 assistant 消息（含 reasoning_content）
       并回传，工具结果以 role=tool 消息附上同一 tool_call_id；
-    - 只有当模型不再返回 tool_calls 时，才把 content 当作最终审查 JSON；
-    - 达到上限仍未得到最终回答时抛出明确错误。
+    - 工具额度用完后禁止继续调用工具，要求模型给出最终审查 JSON。
     """
     messages = base_payload["messages"]
     tool_rounds = 0
     tool_calls_used = 0
+    final_requested = False
 
     while True:
+        if (tool_rounds >= MAX_TOOL_ROUNDS or tool_calls_used >= MAX_TOOL_CALLS) and not final_requested:
+            base_payload["tool_choice"] = "none"
+            messages.append({
+                "role": "user",
+                "content": "工具调用额度已用尽。请只根据本次 diff 和已取得的上下文输出最终审查 JSON；"
+                           "无法确认的问题不要编造评论。",
+            })
+            final_requested = True
         result = deepseek_request(base_payload, deepseek_api_key)
         try:
             message = result["choices"][0]["message"]
@@ -104,22 +112,14 @@ def run_review_loop(base_payload, deepseek_api_key):
                 )
             return content
 
+        if final_requested:
+            raise RuntimeError("DeepSeek 在禁止工具调用后仍返回 tool_calls，无法生成最终审查 JSON。")
         tool_rounds += 1
-        if (
-            tool_rounds > MAX_TOOL_ROUNDS
-            or tool_calls_used + len(tool_calls) > MAX_TOOL_CALLS
-        ):
-            raise RuntimeError(
-                "AI 工具调用达到上限"
-                f"（轮次 {MAX_TOOL_ROUNDS} / 调用 {MAX_TOOL_CALLS} 次），"
-                "模型仍未生成最终审查 JSON。"
-            )
 
         # 保留完整 assistant 消息（含 tool_calls 与可能的 reasoning_content）。
         messages.append(dict(message))
 
         for tool_call in tool_calls:
-            tool_calls_used += 1
             try:
                 tool_name = tool_call["function"]["name"]
                 arguments = tool_call["function"].get("arguments", "{}")
@@ -129,7 +129,16 @@ def run_review_loop(base_payload, deepseek_api_key):
                     "DeepSeek 返回了无法解析的 tool_call 结构。"
                 ) from exc
 
-            outcome = agent_tools.execute_tool_call(tool_name, arguments)
+            if tool_calls_used < MAX_TOOL_CALLS:
+                tool_calls_used += 1
+                outcome = agent_tools.execute_tool_call(tool_name, arguments)
+            else:
+                # 每个 assistant tool_call 都必须有对应的 tool 回复，但不再执行超额调用。
+                outcome = {
+                    "status": "error",
+                    "error_code": "tool_budget_exhausted",
+                    "message": "工具调用额度已用尽，请根据已有信息完成审查。",
+                }
             agent_tools.append_tool_trace(
                 tool_rounds, tool_name, arguments, outcome
             )
