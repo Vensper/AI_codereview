@@ -68,14 +68,26 @@ pipeline {
                         env.REVIEW_FAILURE_STAGE = '识别 MR'
                         env.REVIEW_IDENTITY_CONFLICT = 'false'
                         def pluginAction = env.gitlabActionType?.trim()?.toUpperCase()
-                        def pluginEvent = ['MERGE', 'NOTE'].contains(pluginAction) ||
+                        def noteCause = false
+                        try {
+                            noteCause = currentBuild.getBuildCauses(
+                                'com.dabsquared.gitlabjenkins.cause.GitLabWebHookCause'
+                            ).any { cause ->
+                                cause?.data?.actionType?.toString()?.toUpperCase() == 'NOTE'
+                            }
+                        } catch (Exception ignored) {
+                            echo '无法读取 GitLab 构建原因；继续使用插件变量和 Webhook 参数识别触发方式。'
+                        }
+                        def keywordPhrase = env.gitlabTriggerPhrase?.trim() == '/codereview'
+                        def commentReview = pluginAction == 'NOTE' || noteCause || keywordPhrase ||
+                            params.WEBHOOK_EVENT_KIND?.trim() == 'note'
+                        def pluginEvent = ['MERGE', 'NOTE'].contains(pluginAction) || noteCause ||
                             env.gitlabMergeRequestIid?.trim() ||
                             (!pluginAction && env.gitlabSourceBranch?.trim() &&
                              env.gitlabTargetBranch?.trim() &&
                              env.gitlabSourceBranch.trim() != env.gitlabTargetBranch.trim())
                         def rawEvent = params.WEBHOOK_EVENT_KIND?.trim() in ['merge_request', 'note']
                         env.REVIEW_GITLAB_TRIGGER = (pluginEvent || rawEvent) ? 'true' : 'false'
-                        def commentReview = pluginAction == 'NOTE' || params.WEBHOOK_EVENT_KIND?.trim() == 'note'
                         env.REVIEW_BYPASS_DEDUP = (params.FORCE_REVIEW || commentReview) ? 'true' : 'false'
 
                         if (env.gitlabMergeRequestIid?.trim() && params.WEBHOOK_MR_IID?.trim() &&
@@ -149,6 +161,8 @@ pipeline {
                             Source branch: ${env.EFFECTIVE_SOURCE_BRANCH}
                             Target branch: ${env.EFFECTIVE_TARGET_BRANCH}
                             Publish comment: ${env.REVIEW_PUBLISH_COMMENT}
+                            GitLab action type: ${pluginAction ?: 'unknown'}
+                            Keyword comment detected: ${commentReview}
                             Bypass completed-review check: ${env.REVIEW_BYPASS_DEDUP}
                         """.stripIndent()
                     }

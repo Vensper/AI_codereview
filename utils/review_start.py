@@ -20,6 +20,7 @@ def bypass_completed_review_check():
     return (
         os.environ.get("WEBHOOK_EVENT_KIND", "").strip().lower() == "note"
         or os.environ.get("gitlabActionType", "").strip().upper() == "NOTE"
+        or os.environ.get("gitlabTriggerPhrase", "").strip() == "/codereview"
     )
 
 

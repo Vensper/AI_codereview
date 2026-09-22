@@ -7,7 +7,11 @@ from utils import review_start
 
 class ReviewStartTests(unittest.TestCase):
     def test_codereview_comment_runs_again_for_an_already_reviewed_sha(self):
-        for event in ({"WEBHOOK_EVENT_KIND": "note"}, {"gitlabActionType": "NOTE"}):
+        for event in (
+            {"WEBHOOK_EVENT_KIND": "note"},
+            {"gitlabActionType": "NOTE"},
+            {"gitlabTriggerPhrase": " /codereview "},
+        ):
             with self.subTest(event=event), patch.dict(os.environ, {
                 "EFFECTIVE_SOURCE_SHA": "a" * 40,
                 "FORCE_REVIEW": "false",
@@ -47,6 +51,10 @@ class ReviewStartTests(unittest.TestCase):
             self.assertTrue(review_start.bypass_completed_review_check())
         with patch.dict(os.environ, {"REVIEW_BYPASS_DEDUP": "true"}, clear=True):
             self.assertTrue(review_start.bypass_completed_review_check())
+
+    def test_other_comment_does_not_bypass_check(self):
+        with patch.dict(os.environ, {"gitlabTriggerPhrase": "ordinary comment"}, clear=True):
+            self.assertFalse(review_start.bypass_completed_review_check())
 
 
 if __name__ == "__main__":

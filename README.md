@@ -9,7 +9,7 @@
 
 GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 Webhook 接收入口](docs/webhook-receiver.md)传入的参数、GitLab API 的唯一匹配查询。无法唯一定位时停止回写，避免评论写错 MR。手动构建不回写失败通知；未提供 MR 标识的手动构建使用本地 Git diff。
 
-在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Bypass completed-review check` 显示本次是否跳过查重。
+在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。GitLab 插件入口需在 Jenkins 任务中启用 Comments 触发并设置 `/codereview` 匹配规则，同时在 GitLab Webhook 中启用评论事件。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Keyword comment detected` 和 `Bypass completed-review check` 显示本次是否识别为评论触发并跳过查重。
 
 GitLab API 短时超时、连接中断、429 或 502/503/504 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
 
