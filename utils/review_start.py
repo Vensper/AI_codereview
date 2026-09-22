@@ -11,6 +11,18 @@ from utils.common import (
 )
 
 
+def bypass_completed_review_check():
+    if any(
+        os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+        for name in ("FORCE_REVIEW", "REVIEW_BYPASS_DEDUP")
+    ):
+        return True
+    return (
+        os.environ.get("WEBHOOK_EVENT_KIND", "").strip().lower() == "note"
+        or os.environ.get("gitlabActionType", "").strip().upper() == "NOTE"
+    )
+
+
 def main():
     if not publishing_enabled():
         print("Publishing disabled; start notification skipped.")
@@ -18,9 +30,7 @@ def main():
 
     base_url, token, project_id, mr_iid = publishing_context()
     source_sha = required_env("EFFECTIVE_SOURCE_SHA")
-    force_review = os.environ.get("FORCE_REVIEW", "false").lower() in {
-        "1", "true", "yes"
-    }
+    force_review = bypass_completed_review_check()
 
     if not force_review and has_completed_review(
         base_url, token, project_id, mr_iid, source_sha
@@ -42,7 +52,7 @@ def main():
         remove=["ai_code_review_done", "ai_code_review_failed"],
     )
     if force_review:
-        print("Review start note posted; FORCE_REVIEW=true, deduplication bypassed.")
+        print("Review start note posted; completed-review check bypassed.")
     else:
         print("Review start note posted and reviewing label applied.")
 

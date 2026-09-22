@@ -4,9 +4,15 @@
 //test 2026/9/21 17：15
 ## Jenkins 构建进度
 
-此流水线使用三个阶段作为 Jenkins 任务主页的进度列：`checkout`（识别 MR、检出、查重）、`ai review`（预合并、准备 diff、AI 审查）、`report`（发布 GitLab 评审结果）。每次构建占一行，构建编号、当前阶段的进度条和阶段用时由 Jenkins 的 **Pipeline: Stage View** 插件显示；运行中刷新任务主页即可查看更新。
+此流水线使用三个阶段作为 Jenkins 任务主页的进度列：`checkout`（识别 MR、检出、查重）、`ai review`（预合并、准备 diff、AI 审查）、`report`（发布 GitLab 评审结果、失败通知及产物归档）。前两个阶段失败后仍会进入 `report`，并保留失败时的具体步骤名。每次构建占一行，构建编号、当前阶段的进度条和阶段用时由 Jenkins 的 **Pipeline: Stage View** 插件显示；运行中刷新任务主页即可查看更新。
 
-若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，后两列显示为跳过；失败时，尚未运行的阶段同样显示为跳过。
+GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 Webhook 接收入口](docs/webhook-receiver.md)传入的参数、GitLab API 的唯一匹配查询。无法唯一定位时停止回写，避免评论写错 MR。手动构建不回写失败通知；未提供 MR 标识的手动构建使用本地 Git diff。
+
+在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Bypass completed-review check` 显示本次是否跳过查重。
+
+GitLab API 短时超时、连接中断、429 或 502/503/504 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
+
+若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
 
 
 

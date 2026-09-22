@@ -2,7 +2,7 @@ import os
 import urllib.parse
 
 from utils.common import (
-    post_summary_note,
+    post_failure_note,
     publishing_context,
     publishing_enabled,
     update_mr_labels,
@@ -17,12 +17,17 @@ def main():
     base_url, token, project_id, mr_iid = publishing_context()
     stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
     if stage not in {
+        "识别 MR",
+        "检出审查工具",
+        "检出 MR 源分支",
+        "获取源提交 SHA",
         "发送开始通知",
         "准备预合并工作区",
         "获取 GitLab MR diff",
         "生成本地 Git 兜底 diff",
         "AI 审查",
         "发布审查结果",
+        "归档审查产物",
     }:
         stage = "未知阶段"
     build_url = os.environ.get("BUILD_URL", "").strip()
@@ -49,7 +54,10 @@ def main():
     except RuntimeError as exc:
         failures.append(f"label update: {exc}")
     try:
-        post_summary_note(base_url, token, project_id, mr_iid, body)
+        post_failure_note(
+            base_url, token, project_id, mr_iid, body,
+            os.environ.get("BUILD_TAG", "").strip(),
+        )
     except RuntimeError as exc:
         failures.append(f"failure note: {exc}")
     if failures:
