@@ -419,7 +419,7 @@ pipeline {
                             env.REVIEW_FAILURE_STAGE = '归档审查产物'
                         }
                         archiveArtifacts(
-                            artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/premerge-result.json, review-tool/ai-tool-trace.json, review-tool/review-skip.flag, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
+                            artifacts: 'mr-source/mr.diff.local, mr-source/changed-files.txt, review-tool/mr.diff, review-tool/diff-source.json, review-tool/diff-api-fallback-reason.txt, review-tool/premerge-result.json, review-tool/ai-tool-trace.json, review-tool/review-skip.flag, review-tool/review-raw-initial.txt, review-tool/review-raw.txt, review-tool/review-result.json, review-tool/review-result.md',
                             allowEmptyArchive: true
                         )
                     } catch (Exception failure) {

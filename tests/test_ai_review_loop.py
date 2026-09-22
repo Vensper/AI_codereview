@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from utils.ai_review import run_review_loop
+from utils.ai_review import parse_review_with_retry, run_review_loop
 
 
 def tool_message(count=1):
@@ -20,6 +20,22 @@ def final_message():
 
 
 class ReviewLoopTests(unittest.TestCase):
+    def test_invalid_final_text_retries_once_as_json_without_tools(self):
+        payload = {"messages": [], "tool_choice": "auto", "max_tokens": 3000}
+        response = {"choices": [{"finish_reason": "stop", "message": {
+            "content": '{"summary":"ok","change_intent":"change","changes":[],"comments":[]}'
+        }}]}
+        with patch("utils.ai_review.deepseek_request", return_value=response) as request, patch(
+            "utils.ai_review.write_text"
+        ) as write:
+            review = parse_review_with_retry(payload, "test-key", "analysis followed by truncated JSON {\"summary\":")
+        self.assertEqual(review["summary"], "ok")
+        request.assert_called_once()
+        self.assertEqual(payload["tool_choice"], "none")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 6000)
+        self.assertEqual(write.call_count, 2)
+
     def test_tool_round_limit_requests_final_answer_without_tools(self):
         choices = []
 

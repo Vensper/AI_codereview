@@ -16,6 +16,7 @@ MODEL = "deepseek-v4-flash"
 MAX_DIFF_CHARS = 60000
 MAX_TOOL_ROUNDS = 8
 MAX_TOOL_CALLS = 16
+FINAL_JSON_MAX_TOKENS = 6000
 
 # 默认预合并工作区路径（相对 review-tool 目录）。
 DEFAULT_PREMERGE_ROOT = "../mr-premerge"
@@ -89,6 +90,8 @@ def run_review_loop(base_payload, deepseek_api_key):
     while True:
         if (tool_rounds >= MAX_TOOL_ROUNDS or tool_calls_used >= MAX_TOOL_CALLS) and not final_requested:
             base_payload["tool_choice"] = "none"
+            base_payload["response_format"] = {"type": "json_object"}
+            base_payload["max_tokens"] = FINAL_JSON_MAX_TOKENS
             messages.append({
                 "role": "user",
                 "content": "工具调用额度已用尽。请只根据本次 diff 和已取得的上下文输出最终审查 JSON；"
@@ -149,6 +152,42 @@ def run_review_loop(base_payload, deepseek_api_key):
                     "content": json.dumps(outcome, ensure_ascii=False),
                 }
             )
+
+
+def parse_review_with_retry(payload, deepseek_api_key, raw_review):
+    """最终文本无效时，禁止工具调用并重试一次完整 JSON 输出。"""
+    try:
+        return normalize_review(extract_json_object(raw_review))
+    except (ValueError, json.JSONDecodeError):
+        write_text("review-raw-initial.txt", raw_review.strip() + "\n")
+
+    payload["tool_choice"] = "none"
+    payload["response_format"] = {"type": "json_object"}
+    payload["max_tokens"] = FINAL_JSON_MAX_TOKENS
+    payload["messages"].append({
+        "role": "user",
+        "content": "请根据上面的 MR diff 和已取得的工具结果，重新输出完整的审查 JSON。"
+                   "只输出一个符合既定 schema 的 JSON 对象；不要分析过程、Markdown 或解释。"
+                   "无法确认的问题不要编造评论。",
+    })
+    result = deepseek_request(payload, deepseek_api_key)
+    try:
+        choice = result["choices"][0]
+        message = choice["message"]
+        retry_raw = message["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("DeepSeek JSON retry did not return message content.") from exc
+    if message.get("tool_calls") or not isinstance(retry_raw, str) or not retry_raw.strip():
+        raise RuntimeError("DeepSeek JSON retry returned no usable review text.")
+    write_text("review-raw.txt", retry_raw.strip() + "\n")
+    if choice.get("finish_reason") == "length":
+        raise RuntimeError("DeepSeek JSON retry was truncated; see review-raw.txt.")
+    try:
+        return normalize_review(extract_json_object(retry_raw))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "AI output cannot be used as review JSON after retry; see review-raw.txt."
+        ) from exc
 
 
 def main():
@@ -266,12 +305,7 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
         write_json("ai-tool-trace.json", agent_tools.get_trace())
 
     write_text("review-raw.txt", raw_review.strip() + "\n")
-    try:
-        review = normalize_review(extract_json_object(raw_review))
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "AI output cannot be used as review JSON; see review-raw.txt."
-        ) from exc
+    review = parse_review_with_retry(payload, deepseek_api_key, raw_review)
 
     write_json("review-result.json", review)
     print(f"AI review result prepared: comments={len(review['comments'])}.")
