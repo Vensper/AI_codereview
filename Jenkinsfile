@@ -104,7 +104,7 @@ pipeline {
                 dir('review-tool') {
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: 'refs/heads/master']],
+                        branches: [[name: 'refs/heads/codex/jenkins-stage-view']],
                         userRemoteConfigs: [[
                             url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
                             credentialsId: 'gitlab-project-read'
