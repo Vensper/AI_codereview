@@ -4,7 +4,12 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from utils.common import GitLabAPIError, gitlab_api, post_failure_note
+from utils.common import (
+    GitLabAPIError,
+    GitLabPublicationUncertainError,
+    gitlab_api,
+    post_failure_note,
+)
 
 
 class Response:
@@ -53,26 +58,26 @@ class GitLabFailureReportingTests(unittest.TestCase):
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_post_timeout_checks_for_existing_note_before_retry(self, _user):
         timeout = GitLabAPIError("timeout", retryable=True, retry_delay=1)
-        with patch("utils.common._failure_note_exists", side_effect=[False, True]) as exists, patch("utils.common.post_summary_note", side_effect=timeout) as post, patch("utils.common.time.sleep"):
+        with patch("utils.common._find_note_by_marker", side_effect=[None, {"id": 9}]) as find, patch("utils.common.post_summary_note", side_effect=timeout) as post, patch("utils.common.time.sleep"):
             self.assertIsNone(post_failure_note("https://gitlab.example", "token", 5, 12, "failure", "jenkins-job-8"))
-        self.assertEqual(exists.call_count, 2)
+        self.assertEqual(find.call_count, 2)
         post.assert_called_once()
         self.assertIn("<!-- AI_CODE_REVIEW_FAILURE:jenkins-job-8 -->", post.call_args.args[-1])
 
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_post_retries_only_when_note_lookup_succeeds_and_is_absent(self, _user):
         timeout = GitLabAPIError("timeout", retryable=True, retry_delay=1)
-        with patch("utils.common._failure_note_exists", side_effect=[False, False]) as exists, patch("utils.common.post_summary_note", side_effect=[timeout, {"id": 9}]) as post, patch("utils.common.time.sleep"):
+        with patch("utils.common._find_note_by_marker", side_effect=[None, None]) as find, patch("utils.common.post_summary_note", side_effect=[timeout, {"id": 9}]) as post, patch("utils.common.time.sleep"):
             self.assertEqual(post_failure_note("https://gitlab.example", "token", 5, 12, "failure", "jenkins-job-8"), {"id": 9})
-        self.assertEqual(exists.call_count, 2)
+        self.assertEqual(find.call_count, 2)
         self.assertEqual(post.call_count, 2)
 
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_lookup_failure_never_posts(self, _user):
-        with patch("utils.common._failure_note_exists", side_effect=GitLabAPIError("offline", True)) as exists, patch("utils.common.post_summary_note") as post:
-            with self.assertRaises(GitLabAPIError):
+        with patch("utils.common._find_note_by_marker", side_effect=GitLabAPIError("offline", True)) as find, patch("utils.common.post_summary_note") as post:
+            with self.assertRaises(GitLabPublicationUncertainError):
                 post_failure_note("https://gitlab.example", "token", 5, 12, "failure", "jenkins-job-8")
-        exists.assert_called_once()
+        find.assert_called_once()
         post.assert_not_called()
 
 

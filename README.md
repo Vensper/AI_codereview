@@ -11,7 +11,9 @@ GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 W
 
 在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。GitLab 插件入口需在 Jenkins 任务中启用 Comments 触发并设置 `/codereview` 匹配规则，同时在 GitLab Webhook 中启用评论事件。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Keyword comment detected` 和 `Bypass completed-review check` 显示本次是否识别为评论触发并跳过查重。
 
-GitLab API 短时超时、连接中断、429 或 502/503/504 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
+GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
+
+汇总评论和行级 Discussion 也在首次 POST 中写入由 `BUILD_TAG`、源提交 SHA 和问题指纹组成的隐藏标识。POST 超时后先查询同一机器人发布的标识：已存在即视为成功，确认不存在才有限重试，查询失败则停止发布。行级评论只有在确认未发布后才能降级到汇总区；降级内容随汇总评论的标识一起受到保护。每次 `/codereview` 会产生新的 `BUILD_TAG`，因此仍可对相同提交强制重审。
 
 AI 工具调查继续使用 DeepSeek Chat Completions；最终评审固定通过 DeepSeek Responses API，并将 `review.schema.json` 作为 `json_schema` 约束。结果还会使用同一份 Schema 在本地校验；首次输出不完整或被截断时重试一次，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
 
