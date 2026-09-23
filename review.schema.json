@@ -1,0 +1,92 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "对当前 MR 的总体审核结论。"
+    },
+    "change_intent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "对当前 MR 修改意图的概括。"
+    },
+    "changes": {
+      "type": "array",
+      "description": "当前 MR 中各文件的修改点。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "与 diff 完全一致的文件路径。"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "该文件的变更内容。"
+          }
+        },
+        "required": ["path", "description"]
+      }
+    },
+    "comments": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "仅针对 diff 中真实新增或删除行的审核意见；没有问题时为空数组。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "与 diff 完全一致的文件路径。"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "side": {
+            "type": "string",
+            "enum": ["new", "old"]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suggestion": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "title",
+          "path",
+          "line",
+          "side",
+          "severity",
+          "problem",
+          "risk",
+          "suggestion"
+        ]
+      }
+    }
+  },
+  "required": ["summary", "change_intent", "changes", "comments"]
+}

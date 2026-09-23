@@ -7,6 +7,69 @@ SEVERITIES = {"low", "medium", "high"}
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
+def validate_json_schema(value, schema, path="$"):
+    """Validate the small JSON Schema subset used by review.schema.json.
+
+    Keeping this validator in the standard library avoids installing packages on
+    the Jenkins agent while still making the schema file the single contract
+    used by both DeepSeek and the local publication gate.
+    """
+    expected_type = schema.get("type")
+    type_matches = {
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+        "boolean": lambda item: isinstance(item, bool),
+        "null": lambda item: item is None,
+    }
+    if expected_type:
+        matcher = type_matches.get(expected_type)
+        if matcher is None:
+            raise ValueError(f"Unsupported schema type at {path}: {expected_type}")
+        if not matcher(value):
+            raise ValueError(f"Schema validation failed at {path}: expected {expected_type}.")
+
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"Schema validation failed at {path}: value is not in enum.")
+
+    if expected_type == "string":
+        if len(value) < schema.get("minLength", 0):
+            raise ValueError(f"Schema validation failed at {path}: string is too short.")
+
+    if expected_type in {"integer", "number"}:
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"Schema validation failed at {path}: value is below minimum.")
+
+    if expected_type == "array":
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise ValueError(f"Schema validation failed at {path}: too many items.")
+        item_schema = schema.get("items")
+        if item_schema:
+            for index, item in enumerate(value):
+                validate_json_schema(item, item_schema, f"{path}[{index}]")
+
+    if expected_type == "object":
+        properties = schema.get("properties", {})
+        missing = [name for name in schema.get("required", []) if name not in value]
+        if missing:
+            raise ValueError(
+                f"Schema validation failed at {path}: missing {', '.join(missing)}."
+            )
+        if schema.get("additionalProperties") is False:
+            extras = sorted(set(value) - set(properties))
+            if extras:
+                raise ValueError(
+                    f"Schema validation failed at {path}: unexpected {', '.join(extras)}."
+                )
+        for name, child_schema in properties.items():
+            if name in value:
+                validate_json_schema(value[name], child_schema, f"{path}.{name}")
+
+    return value
+
+
 def extract_json_object(raw):
     text = raw.strip()
     if text.startswith("```"):

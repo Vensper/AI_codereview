@@ -1,5 +1,32 @@
 # PH-SAO-QC-JJFA-2026
 
+//test 2026/9/21 17：15
+//test 2026/9/21 17：15
+//test 2026/9/22 17：16
+//test 2026/9/23 16：05
+//test 2026/9/23 16：15
+//test 2026/9/23 16：27
+//test 2026/9/23 16：30
+//test 2026/9/23 16：33
+## Jenkins 构建进度
+
+此流水线使用三个阶段作为 Jenkins 任务主页的进度列：`checkout`（识别 MR、检出、查重）、`ai review`（预合并、准备 diff、AI 审查）、`report`（发布 GitLab 评审结果、失败通知及产物归档）。前两个阶段失败后仍会进入 `report`，并保留失败时的具体步骤名。每次构建占一行，构建编号、当前阶段的进度条和阶段用时由 Jenkins 的 **Pipeline: Stage View** 插件显示；运行中刷新任务主页即可查看更新。
+
+GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 Webhook 接收入口](docs/webhook-receiver.md)传入的参数、GitLab API 的唯一匹配查询。无法唯一定位时停止回写，避免评论写错 MR。手动构建不回写失败通知；未提供 MR 标识的手动构建使用本地 Git diff。
+
+在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。GitLab 插件入口需在 Jenkins 任务中启用 Comments 触发并设置 `/codereview` 匹配规则，同时在 GitLab Webhook 中启用评论事件。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Keyword comment detected` 和 `Bypass completed-review check` 显示本次是否识别为评论触发并跳过查重。
+
+GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
+
+汇总评论和行级 Discussion 也在首次 POST 中写入由 `BUILD_TAG`、源提交 SHA 和问题指纹组成的隐藏标识。POST 超时后先查询同一机器人发布的标识：已存在即视为成功，确认不存在才有限重试，查询失败则停止发布。行级评论只有在确认未发布后才能降级到汇总区；降级内容随汇总评论的标识一起受到保护。每次 `/codereview` 会产生新的 `BUILD_TAG`，因此仍可对相同提交强制重审。
+
+开始通知使用同样的隐藏标识确认和安全重试。开始通知或 `ai_code_reviewing` 标签暂时无法写入时，流水线记录警告并继续 AI 审查；普通 MR 事件的完成查重查询仍必须成功，避免在无法确认历史状态时重复审查。
+
+AI 工具调查继续使用 DeepSeek Chat Completions；最终评审固定通过 DeepSeek Responses API，并将 `review.schema.json` 作为 `json_schema` 约束。结果还会使用同一份 Schema 在本地校验；首次输出不完整或被截断时重试一次，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
+
+若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
+
+
 
 new test 2026/9/9 11:25
 new test 2026/9/9 17:38
@@ -8,6 +35,8 @@ new test 202/9/10 11:13
 new test 202/9/12 16:10
 new test 202/9/15 14:28
 new test 202/9/15 14:53
+new test 202/9/21 18:00
+new test 202/9/21 18:08
 ## Getting started
 
 To make it easy for you to get started with GitLab, here's a list of recommended next steps.

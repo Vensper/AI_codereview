@@ -1,15 +1,18 @@
 import json
 import os
-import urllib.parse
 
 from utils.common import (
-    gitlab_api,
+    GitLabPublicationUncertainError,
+    current_gitlab_user_id,
     gitlab_base_url,
-    post_summary_note,
+    inline_comment_marker,
+    post_marked_discussion,
+    post_review_summary_note,
     publishing_enabled,
     read_text,
     required_env,
     review_done_marker,
+    summary_note_marker,
     update_mr_labels,
     update_mr_note,
     write_text,
@@ -19,9 +22,17 @@ from utils.review_result import build_summary_note, inline_body
 
 
 def post_inline_comment(
-    base_url, token, project_id, mr_iid, version, position, comment
+    base_url,
+    token,
+    project_id,
+    mr_iid,
+    version,
+    position,
+    comment,
+    build_tag,
+    source_sha,
+    bot_user_id,
 ):
-    project = urllib.parse.quote(str(project_id), safe="")
     form = {
         "body": inline_body(comment),
         "position[position_type]": "text",
@@ -36,12 +47,9 @@ def post_inline_comment(
     else:
         form["position[old_line]"] = position["old_line"]
 
-    return gitlab_api(
-        base_url,
-        token,
-        "POST",
-        f"/projects/{project}/merge_requests/{mr_iid}/discussions",
-        form,
+    marker = inline_comment_marker(build_tag, source_sha, comment)
+    return post_marked_discussion(
+        base_url, token, project_id, mr_iid, form, marker, bot_user_id
     )
 
 
@@ -50,6 +58,7 @@ def main():
     source_sha = required_env("EFFECTIVE_SOURCE_SHA").lower()
     mr_iid = os.environ.get("EFFECTIVE_MR_IID", "").strip()
     project_id = os.environ.get("EFFECTIVE_PROJECT_ID", "").strip()
+    build_tag = os.environ.get("BUILD_TAG", "").strip()
     publish = publishing_enabled()
 
     full_diff = read_text("mr.diff")
@@ -66,6 +75,8 @@ def main():
             raise RuntimeError("Project ID and MR IID are required for publishing.")
 
         base_url = gitlab_base_url(repository_url)
+        required_env("BUILD_TAG")
+        bot_user_id = current_gitlab_user_id(base_url, gitlab_token)
         version = latest_mr_version(
             base_url, gitlab_token, project_id, mr_iid
         )
@@ -106,8 +117,13 @@ def main():
                     version,
                     position,
                     comment,
+                    build_tag,
+                    source_sha,
+                    bot_user_id,
                 )
                 posted_count += 1
+            except GitLabPublicationUncertainError:
+                raise
             except RuntimeError as exc:
                 fallback_items.append(
                     {
@@ -140,8 +156,17 @@ def main():
     if publish:
         gitlab_token = required_env("GITLAB_API_TOKEN")
         base_url = gitlab_base_url(repository_url)
-        summary_note_response = post_summary_note(
-            base_url, gitlab_token, project_id, mr_iid, summary_note
+        summary_marker = summary_note_marker(build_tag, source_sha)
+        published_summary = summary_note.rstrip() + "\n\n" + summary_marker + "\n"
+        summary_note_response = post_review_summary_note(
+            base_url,
+            gitlab_token,
+            project_id,
+            mr_iid,
+            summary_note,
+            build_tag,
+            source_sha,
+            bot_user_id,
         )
         update_mr_labels(
             base_url,
@@ -164,7 +189,10 @@ def main():
             project_id,
             mr_iid,
             note_id,
-            summary_note.rstrip() + "\n\n" + review_done_marker(source_sha) + "\n",
+            published_summary.rstrip()
+            + "\n\n"
+            + review_done_marker(source_sha)
+            + "\n",
         )
 
     print(

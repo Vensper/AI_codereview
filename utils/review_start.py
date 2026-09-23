@@ -2,13 +2,26 @@ import os
 
 from utils.common import (
     has_completed_review,
-    post_summary_note,
+    post_review_start_note,
     publishing_context,
     publishing_enabled,
     required_env,
     update_mr_labels,
     write_text,
 )
+
+
+def bypass_completed_review_check():
+    if any(
+        os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+        for name in ("FORCE_REVIEW", "REVIEW_BYPASS_DEDUP")
+    ):
+        return True
+    return (
+        os.environ.get("WEBHOOK_EVENT_KIND", "").strip().lower() == "note"
+        or os.environ.get("gitlabActionType", "").strip().upper() == "NOTE"
+        or os.environ.get("gitlabTriggerPhrase", "").strip() == "/codereview"
+    )
 
 
 def main():
@@ -18,9 +31,7 @@ def main():
 
     base_url, token, project_id, mr_iid = publishing_context()
     source_sha = required_env("EFFECTIVE_SOURCE_SHA")
-    force_review = os.environ.get("FORCE_REVIEW", "false").lower() in {
-        "1", "true", "yes"
-    }
+    force_review = bypass_completed_review_check()
 
     if not force_review and has_completed_review(
         base_url, token, project_id, mr_iid, source_sha
@@ -32,17 +43,39 @@ def main():
         )
         return
 
-    post_summary_note(base_url, token, project_id, mr_iid, "已触发AI代码审核")
-    update_mr_labels(
-        base_url,
-        token,
-        project_id,
-        mr_iid,
-        add=["ai_code_reviewing"],
-        remove=["ai_code_review_done", "ai_code_review_failed"],
-    )
+    warnings = []
+    try:
+        post_review_start_note(
+            base_url,
+            token,
+            project_id,
+            mr_iid,
+            "已触发AI代码审核",
+            required_env("BUILD_TAG"),
+            source_sha,
+        )
+    except RuntimeError as exc:
+        warnings.append(f"start note: {exc}")
+
+    try:
+        update_mr_labels(
+            base_url,
+            token,
+            project_id,
+            mr_iid,
+            add=["ai_code_reviewing"],
+            remove=["ai_code_review_done", "ai_code_review_failed"],
+        )
+    except RuntimeError as exc:
+        warnings.append(f"reviewing label: {exc}")
+
     if force_review:
-        print("Review start note posted; FORCE_REVIEW=true, deduplication bypassed.")
+        print("Review deduplication: completed-review check bypassed.")
+    if warnings:
+        print(
+            "Review start notification incomplete; AI review will continue. "
+            + "; ".join(warnings)
+        )
     else:
         print("Review start note posted and reviewing label applied.")
 
