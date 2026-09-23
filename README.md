@@ -13,6 +13,8 @@ GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 W
 
 GitLab API 短时超时、连接中断、429 或 502/503/504 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
 
+AI 工具调查继续使用 DeepSeek Chat Completions；最终评审固定通过 DeepSeek Responses API，并将 `review.schema.json` 作为 `json_schema` 约束。结果还会使用同一份 Schema 在本地校验；首次输出不完整或被截断时重试一次，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
+
 若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
 
 

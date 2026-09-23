@@ -8,10 +8,11 @@ import urllib.request
 import utils.review_agent_tools as agent_tools
 from utils.common import read_text, required_env, write_json, write_text
 from utils.diff_utils import number_diff_for_ai
-from utils.review_result import extract_json_object, normalize_review
+from utils.review_result import normalize_review, validate_json_schema
 
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_RESPONSES_API_URL = "https://api.deepseek.com/responses"
 MODEL = "deepseek-v4-flash"
 MAX_DIFF_CHARS = 60000
 MAX_TOOL_ROUNDS = 8
@@ -20,11 +21,14 @@ FINAL_JSON_MAX_TOKENS = 6000
 
 # 默认预合并工作区路径（相对 review-tool 目录）。
 DEFAULT_PREMERGE_ROOT = "../mr-premerge"
+REVIEW_SCHEMA_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, "review.schema.json")
+)
 
 
-def deepseek_request(payload, api_key):
+def _deepseek_request(url, payload, api_key):
     request = urllib.request.Request(
-        DEEPSEEK_API_URL,
+        url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -52,6 +56,27 @@ def deepseek_request(payload, api_key):
     raise last_error
 
 
+def deepseek_request(payload, api_key):
+    """Call DeepSeek Chat Completions for repository tool exploration."""
+    return _deepseek_request(DEEPSEEK_API_URL, payload, api_key)
+
+
+def deepseek_responses_request(payload, api_key):
+    """Call DeepSeek Responses API for schema-constrained final output."""
+    return _deepseek_request(DEEPSEEK_RESPONSES_API_URL, payload, api_key)
+
+
+def load_review_schema(path=REVIEW_SCHEMA_PATH):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            schema = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("无法读取 review.schema.json。") from exc
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise RuntimeError("review.schema.json 的根 schema 必须是 object。")
+    return schema
+
+
 def load_premerge_context(premerge_root_arg):
     """验证预合并工作区并读取结果元数据。
 
@@ -75,29 +100,20 @@ def load_premerge_context(premerge_root_arg):
 
 
 def run_review_loop(base_payload, deepseek_api_key):
-    """执行受控的 DeepSeek 工具调用循环，返回模型最终文本。
+    """执行受控的 DeepSeek 工具调查循环，返回模型生成的审查草稿。
 
     - 最多 MAX_TOOL_ROUNDS 个工具轮次、MAX_TOOL_CALLS 次总工具调用；
     - 模型返回 tool_calls 时保留完整 assistant 消息（含 reasoning_content）
       并回传，工具结果以 role=tool 消息附上同一 tool_call_id；
-    - 工具额度用完后禁止继续调用工具，要求模型给出最终审查 JSON。
+    - 工具额度用完后停止 Chat Completions 调查；最终 JSON 由 Responses API 生成。
     """
     messages = base_payload["messages"]
     tool_rounds = 0
     tool_calls_used = 0
-    final_requested = False
 
     while True:
-        if (tool_rounds >= MAX_TOOL_ROUNDS or tool_calls_used >= MAX_TOOL_CALLS) and not final_requested:
-            base_payload["tool_choice"] = "none"
-            base_payload["response_format"] = {"type": "json_object"}
-            base_payload["max_tokens"] = FINAL_JSON_MAX_TOKENS
-            messages.append({
-                "role": "user",
-                "content": "工具调用额度已用尽。请只根据本次 diff 和已取得的上下文输出最终审查 JSON；"
-                           "无法确认的问题不要编造评论。",
-            })
-            final_requested = True
+        if tool_rounds >= MAX_TOOL_ROUNDS or tool_calls_used >= MAX_TOOL_CALLS:
+            return ""
         result = deepseek_request(base_payload, deepseek_api_key)
         try:
             message = result["choices"][0]["message"]
@@ -113,10 +129,9 @@ def run_review_loop(base_payload, deepseek_api_key):
                 raise RuntimeError(
                     "DeepSeek 返回了既无工具调用也无正文的消息。"
                 )
+            messages.append(dict(message))
             return content
 
-        if final_requested:
-            raise RuntimeError("DeepSeek 在禁止工具调用后仍返回 tool_calls，无法生成最终审查 JSON。")
         tool_rounds += 1
 
         # 保留完整 assistant 消息（含 tool_calls 与可能的 reasoning_content）。
@@ -131,6 +146,8 @@ def run_review_loop(base_payload, deepseek_api_key):
                 raise RuntimeError(
                     "DeepSeek 返回了无法解析的 tool_call 结构。"
                 ) from exc
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise RuntimeError("DeepSeek 返回的 tool_call 缺少有效 ID。")
 
             if tool_calls_used < MAX_TOOL_CALLS:
                 tool_calls_used += 1
@@ -154,40 +171,171 @@ def run_review_loop(base_payload, deepseek_api_key):
             )
 
 
-def parse_review_with_retry(payload, deepseek_api_key, raw_review):
-    """最终文本无效时，禁止工具调用并重试一次完整 JSON 输出。"""
+def chat_messages_to_responses(messages):
+    """Translate the Chat Completions exploration transcript to Responses input."""
+    instructions = []
+    input_items = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                instructions.append(content.strip())
+            continue
+        if role in {"user", "assistant"}:
+            if isinstance(content, str) and content.strip():
+                input_items.append(
+                    {"type": "message", "role": role, "content": content}
+                )
+            if role == "assistant":
+                for tool_call in message.get("tool_calls") or []:
+                    function = tool_call.get("function") or {}
+                    arguments = function.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tool_call.get("id", ""),
+                            "name": function.get("name", ""),
+                            "arguments": arguments,
+                        }
+                    )
+            continue
+        if role == "tool":
+            input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id", ""),
+                    "output": content if isinstance(content, str) else "",
+                }
+            )
+    return "\n\n".join(instructions), input_items
+
+
+def structured_response_payload(messages, schema, retry_items=None):
+    instructions, input_items = chat_messages_to_responses(messages)
+    input_items.append(
+        {
+            "type": "message",
+            "role": "user",
+            "content": (
+                "工具调查已经结束。请只根据当前 MR diff 和已取得的工具上下文给出最终审核。"
+                "无法确认的问题不要编造；没有问题时 comments 必须是空数组。"
+            ),
+        }
+    )
+    if retry_items:
+        input_items.extend(retry_items)
+    return {
+        "model": MODEL,
+        "instructions": instructions,
+        "input": input_items,
+        "reasoning": {"effort": "none"},
+        "temperature": 0.2,
+        "max_output_tokens": FINAL_JSON_MAX_TOKENS,
+        "stream": False,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "code_review",
+                "schema": schema,
+            }
+        },
+    }
+
+
+def response_output_text(result):
+    if not isinstance(result, dict):
+        raise RuntimeError("DeepSeek Responses API returned an invalid response.")
+    status = result.get("status")
+    if status != "completed":
+        reason = (result.get("incomplete_details") or {}).get("reason") or status or "unknown"
+        raise RuntimeError(f"DeepSeek structured response did not complete: {reason}.")
+    parts = []
+    for item in result.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "output_text":
+                text = content.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+    raw = "".join(parts).strip()
+    if not raw:
+        raise RuntimeError("DeepSeek structured response contains no output text.")
+    return raw
+
+
+def validate_review_text(raw_review, schema):
     try:
-        return normalize_review(extract_json_object(raw_review))
-    except (ValueError, json.JSONDecodeError):
+        value = json.loads(raw_review)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Structured review is not valid JSON.") from exc
+    validate_json_schema(value, schema)
+    if not value["summary"].strip() or not value["change_intent"].strip():
+        raise ValueError("Structured review summary and change_intent cannot be blank.")
+    for index, change in enumerate(value["changes"]):
+        if not change["path"].strip() or not change["description"].strip():
+            raise ValueError(f"Structured review changes[{index}] contains blank text.")
+    comment_text_fields = ("title", "path", "problem", "risk", "suggestion")
+    for index, comment in enumerate(value["comments"]):
+        if any(not comment[name].strip() for name in comment_text_fields):
+            raise ValueError(f"Structured review comments[{index}] contains blank text.")
+    return normalize_review(value)
+
+
+def parse_review_with_retry(payload, deepseek_api_key, raw_review):
+    """Generate the final review with JSON Schema and retry validation once."""
+    schema = load_review_schema()
+    if isinstance(raw_review, str) and raw_review.strip():
         write_text("review-raw-initial.txt", raw_review.strip() + "\n")
 
-    payload["tool_choice"] = "none"
-    payload["response_format"] = {"type": "json_object"}
-    payload["max_tokens"] = FINAL_JSON_MAX_TOKENS
-    payload["messages"].append({
-        "role": "user",
-        "content": "请根据上面的 MR diff 和已取得的工具结果，重新输出完整的审查 JSON。"
-                   "只输出一个符合既定 schema 的 JSON 对象；不要分析过程、Markdown 或解释。"
-                   "无法确认的问题不要编造评论。",
-    })
-    result = deepseek_request(payload, deepseek_api_key)
-    try:
-        choice = result["choices"][0]
-        message = choice["message"]
-        retry_raw = message["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("DeepSeek JSON retry did not return message content.") from exc
-    if message.get("tool_calls") or not isinstance(retry_raw, str) or not retry_raw.strip():
-        raise RuntimeError("DeepSeek JSON retry returned no usable review text.")
-    write_text("review-raw.txt", retry_raw.strip() + "\n")
-    if choice.get("finish_reason") == "length":
-        raise RuntimeError("DeepSeek JSON retry was truncated; see review-raw.txt.")
-    try:
-        return normalize_review(extract_json_object(retry_raw))
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "AI output cannot be used as review JSON after retry; see review-raw.txt."
-        ) from exc
+    retry_items = []
+    last_error = None
+    for attempt in range(2):
+        raw_structured = None
+        result = deepseek_responses_request(
+            structured_response_payload(payload["messages"], schema, retry_items),
+            deepseek_api_key,
+        )
+        try:
+            raw_structured = response_output_text(result)
+            write_text("review-raw.txt", raw_structured + "\n")
+            review = validate_review_text(raw_structured, schema)
+            write_text("review-validation.txt", "valid\n")
+            return review
+        except (RuntimeError, ValueError) as exc:
+            last_error = exc
+            write_text("review-validation.txt", f"invalid: {exc}\n")
+            if attempt == 0:
+                retry_items = []
+                if raw_structured is not None:
+                    write_text(
+                        "review-raw-structured-initial.txt", raw_structured + "\n"
+                    )
+                    retry_items.append(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": raw_structured,
+                        }
+                    )
+                retry_items.append(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": (
+                            "上一次结构化审核未通过校验："
+                            f"{exc} 请重新生成完整审核；禁止省略任何必填字段。"
+                        ),
+                    }
+                )
+
+    raise RuntimeError(
+        "AI structured output failed after retry; "
+        "see review-validation.txt and review-raw.txt."
+    ) from last_error
 
 
 def main():
@@ -304,7 +452,6 @@ Diff 是否已截断: {"是，仅提供前 60000 个字符" if truncated else "�
         # 无论成败都落盘 trace，便于排查工具行为；trace 仅含元数据。
         write_json("ai-tool-trace.json", agent_tools.get_trace())
 
-    write_text("review-raw.txt", raw_review.strip() + "\n")
     review = parse_review_with_retry(payload, deepseek_api_key, raw_review)
 
     write_json("review-result.json", review)
