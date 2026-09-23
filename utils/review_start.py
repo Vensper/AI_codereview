@@ -2,7 +2,7 @@ import os
 
 from utils.common import (
     has_completed_review,
-    post_summary_note,
+    post_review_start_note,
     publishing_context,
     publishing_enabled,
     required_env,
@@ -43,17 +43,39 @@ def main():
         )
         return
 
-    post_summary_note(base_url, token, project_id, mr_iid, "已触发AI代码审核")
-    update_mr_labels(
-        base_url,
-        token,
-        project_id,
-        mr_iid,
-        add=["ai_code_reviewing"],
-        remove=["ai_code_review_done", "ai_code_review_failed"],
-    )
+    warnings = []
+    try:
+        post_review_start_note(
+            base_url,
+            token,
+            project_id,
+            mr_iid,
+            "已触发AI代码审核",
+            required_env("BUILD_TAG"),
+            source_sha,
+        )
+    except RuntimeError as exc:
+        warnings.append(f"start note: {exc}")
+
+    try:
+        update_mr_labels(
+            base_url,
+            token,
+            project_id,
+            mr_iid,
+            add=["ai_code_reviewing"],
+            remove=["ai_code_review_done", "ai_code_review_failed"],
+        )
+    except RuntimeError as exc:
+        warnings.append(f"reviewing label: {exc}")
+
     if force_review:
-        print("Review start note posted; completed-review check bypassed.")
+        print("Review deduplication: completed-review check bypassed.")
+    if warnings:
+        print(
+            "Review start notification incomplete; AI review will continue. "
+            + "; ".join(warnings)
+        )
     else:
         print("Review start note posted and reviewing label applied.")
 

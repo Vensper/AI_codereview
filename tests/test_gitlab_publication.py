@@ -10,7 +10,9 @@ from utils.common import (
     _find_discussion_by_marker,
     inline_comment_marker,
     post_marked_discussion,
+    post_review_start_note,
     post_review_summary_note,
+    start_note_marker,
     summary_note_marker,
 )
 from utils.publish_review import main as publish_review
@@ -84,6 +86,33 @@ class GitLabPublicationTests(unittest.TestCase):
             inline_comment_marker("jenkins-review-8", SHA, comment),
             inline_comment_marker("jenkins-review-9", SHA, comment),
         )
+        self.assertIn(
+            "AI_CODE_REVIEW_START",
+            start_note_marker("jenkins-review-8", SHA),
+        )
+
+    @patch("utils.common.current_gitlab_user_id", return_value=7)
+    def test_start_note_timeout_is_confirmed_without_duplicate_post(self, _user):
+        timeout = GitLabAPIError("timeout", retryable=True, retry_delay=1)
+        with patch(
+            "utils.common._find_note_by_marker",
+            side_effect=[None, {"id": 22, "body": "marked"}],
+        ) as find, patch(
+            "utils.common.post_summary_note", side_effect=timeout
+        ) as post, patch("utils.common.time.sleep"):
+            result = post_review_start_note(
+                "https://gitlab.example",
+                "token",
+                5,
+                12,
+                "start",
+                "jenkins-review-8",
+                SHA,
+            )
+        self.assertEqual(result["id"], 22)
+        self.assertEqual(find.call_count, 2)
+        post.assert_called_once()
+        self.assertIn("AI_CODE_REVIEW_START", post.call_args.args[-1])
 
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_summary_timeout_is_confirmed_without_duplicate_post(self, _user):

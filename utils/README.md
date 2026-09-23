@@ -4,7 +4,7 @@ Jenkins 只调用以下阶段入口；一个入口只完成一个流水线阶段
 
 | Jenkins 阶段 | Python 入口 | 职责 |
 | --- | --- | --- |
-| Announce review start | `python -m utils.review_start` | 查重、开始通知和 reviewing 标签 |
+| Announce review start | `python -m utils.review_start` | 查重、开始通知和 reviewing 标签；通知或标签失败时继续审查 |
 | Resolve MR identity | `python -m utils.resolve_mr_context <output-file>` | 插件与 Webhook 参数缺失时，按项目、分支和 SHA 唯一定位 MR |
 | Fetch MR diff from GitLab API | `python -m utils.prepare_api_diff` | 获取并校验 API diff；以退出码 `10` 请求本地兜底 |
 | Generate local Git diff fallback | `python -m utils.use_local_git_diff <path>` | 导入 Jenkins 生成的本地 diff |

@@ -142,6 +142,13 @@ def failure_note_marker(build_tag):
     return f"<!-- AI_CODE_REVIEW_FAILURE:{_validated_build_tag(build_tag)} -->"
 
 
+def start_note_marker(build_tag, source_sha):
+    return (
+        f"<!-- AI_CODE_REVIEW_START:{REVIEWER_VERSION}:"
+        f"{_validated_build_tag(build_tag)}:{_validated_source_sha(source_sha)} -->"
+    )
+
+
 def summary_note_marker(build_tag, source_sha):
     return (
         f"<!-- AI_CODE_REVIEW_SUMMARY:{REVIEWER_VERSION}:"
@@ -287,6 +294,16 @@ def post_review_summary_note(
     base_url, token, project_id, mr_iid, body, build_tag, source_sha, bot_user_id=None
 ):
     marker = summary_note_marker(build_tag, source_sha)
+    note, _created = post_marked_note(
+        base_url, token, project_id, mr_iid, body, marker, bot_user_id
+    )
+    return note
+
+
+def post_review_start_note(
+    base_url, token, project_id, mr_iid, body, build_tag, source_sha, bot_user_id=None
+):
+    marker = start_note_marker(build_tag, source_sha)
     note, _created = post_marked_note(
         base_url, token, project_id, mr_iid, body, marker, bot_user_id
     )
