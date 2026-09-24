@@ -26,7 +26,7 @@ class GitLabAPIError(RuntimeError):
 
 
 class GitLabPublicationUncertainError(RuntimeError):
-    """A POST may have succeeded, but GitLab could not confirm its marker."""
+    """Terminal failure: GitLab could not confirm whether a marked POST exists."""
 
 
 def required_env(name):
@@ -156,7 +156,7 @@ def summary_note_marker(build_tag, source_sha):
     )
 
 
-def inline_comment_marker(build_tag, source_sha, comment):
+def inline_comment_marker(build_tag, source_sha, comment, run_scoped=False):
     fingerprint_fields = {
         name: comment.get(name)
         for name in (
@@ -174,10 +174,14 @@ def inline_comment_marker(build_tag, source_sha, comment):
         fingerprint_fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    scope = (
+        f"{_validated_build_tag(build_tag)}:"
+        if run_scoped
+        else ""
+    )
     return (
         f"<!-- AI_CODE_REVIEW_INLINE:{REVIEWER_VERSION}:"
-        f"{_validated_build_tag(build_tag)}:{_validated_source_sha(source_sha)}:"
-        f"{fingerprint} -->"
+        f"{scope}{_validated_source_sha(source_sha)}:{fingerprint} -->"
     )
 
 
@@ -293,9 +297,28 @@ def post_marked_note(
 def post_review_summary_note(
     base_url, token, project_id, mr_iid, body, build_tag, source_sha, bot_user_id=None
 ):
-    marker = summary_note_marker(build_tag, source_sha)
-    note, _created = post_marked_note(
-        base_url, token, project_id, mr_iid, body, marker, bot_user_id
+    summary_marker = summary_note_marker(build_tag, source_sha)
+    done_marker = review_done_marker(source_sha)
+    completed_body = _append_hidden_marker(body, summary_marker)
+    completed_body = _append_hidden_marker(completed_body, done_marker)
+    bot_user_id = bot_user_id or current_gitlab_user_id(base_url, token)
+
+    def find_completed_summary():
+        note = _find_note_by_marker(
+            base_url, token, project_id, mr_iid, summary_marker, bot_user_id
+        )
+        if note is not None and done_marker not in str(note.get("body", "")):
+            raise RuntimeError(
+                "The existing review summary does not contain its DONE marker."
+            )
+        return note
+
+    note, _created = _post_marked_resource(
+        find_completed_summary,
+        lambda: post_summary_note(
+            base_url, token, project_id, mr_iid, completed_body
+        ),
+        "completed review summary",
     )
     return note
 
@@ -349,6 +372,19 @@ def publishing_enabled():
     }
 
 
+def force_review_requested():
+    if any(
+        os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+        for name in ("FORCE_REVIEW", "REVIEW_BYPASS_DEDUP")
+    ):
+        return True
+    return (
+        os.environ.get("WEBHOOK_EVENT_KIND", "").strip().lower() == "note"
+        or os.environ.get("gitlabActionType", "").strip().upper() == "NOTE"
+        or os.environ.get("gitlabTriggerPhrase", "").strip() == "/codereview"
+    )
+
+
 def publishing_context():
     repository_url = required_env("EFFECTIVE_REPOSITORY_URL")
     project_id = required_env("EFFECTIVE_PROJECT_ID")
@@ -387,14 +423,3 @@ def has_completed_review(base_url, token, project_id, mr_iid, source_sha):
     return _find_note_by_marker(
         base_url, token, project_id, mr_iid, marker, bot_user_id
     ) is not None
-
-
-def update_mr_note(base_url, token, project_id, mr_iid, note_id, body):
-    project = urllib.parse.quote(str(project_id), safe="")
-    return gitlab_api(
-        base_url,
-        token,
-        "PUT",
-        f"/projects/{project}/merge_requests/{mr_iid}/notes/{note_id}",
-        {"body": body},
-    )

@@ -9,6 +9,7 @@ from utils.ai_review import (
     run_review_loop,
     validate_review_text,
 )
+from utils.ai_executors.base import ExecutionBudget
 
 
 def tool_message(count=1):
@@ -148,7 +149,7 @@ class ReviewLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be blank"):
             validate_review_text(json.dumps(value), load_review_schema())
 
-    def test_tool_round_limit_stops_before_unconstrained_final_call(self):
+    def test_model_round_fuse_stops_investigation(self):
         choices = []
 
         def request(payload, _key):
@@ -159,9 +160,16 @@ class ReviewLoopTests(unittest.TestCase):
         with patch("utils.ai_review.deepseek_request", side_effect=request), patch(
             "utils.ai_review.agent_tools.execute_tool_call", return_value={"status": "ok"}
         ) as execute, patch("utils.ai_review.agent_tools.append_tool_trace"):
-            self.assertEqual(run_review_loop(payload, "test-key"), "")
-        self.assertEqual(choices, ["auto"] * 8)
-        self.assertEqual(execute.call_count, 8)
+            self.assertEqual(
+                run_review_loop(
+                    payload,
+                    "test-key",
+                    budget=ExecutionBudget(max_rounds=3),
+                ),
+                "",
+            )
+        self.assertEqual(choices, ["auto"] * 3)
+        self.assertEqual(execute.call_count, 3)
 
     def test_excess_calls_in_last_batch_get_replies_without_execution(self):
         choices = []
@@ -171,12 +179,17 @@ class ReviewLoopTests(unittest.TestCase):
             return tool_message(2)
 
         payload = {"messages": [], "tool_choice": "auto"}
-        with patch("utils.ai_review.MAX_TOOL_CALLS", 1), patch(
-            "utils.ai_review.deepseek_request", side_effect=request
-        ), patch(
+        with patch("utils.ai_review.deepseek_request", side_effect=request), patch(
             "utils.ai_review.agent_tools.execute_tool_call", return_value={"status": "ok"}
         ) as execute, patch("utils.ai_review.agent_tools.append_tool_trace") as trace:
-            self.assertEqual(run_review_loop(payload, "test-key"), "")
+            self.assertEqual(
+                run_review_loop(
+                    payload,
+                    "test-key",
+                    budget=ExecutionBudget(max_tool_calls=1),
+                ),
+                "",
+            )
         self.assertEqual(choices, ["auto"])
         execute.assert_called_once()
         self.assertEqual(trace.call_args_list[-1].args[-1]["error_code"], "tool_budget_exhausted")

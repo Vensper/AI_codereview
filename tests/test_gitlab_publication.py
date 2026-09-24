@@ -12,6 +12,7 @@ from utils.common import (
     post_marked_discussion,
     post_review_start_note,
     post_review_summary_note,
+    review_done_marker,
     start_note_marker,
     summary_note_marker,
 )
@@ -82,9 +83,17 @@ class GitLabPublicationTests(unittest.TestCase):
                 "jenkins-review-8", SHA, dict(reversed(list(comment.items())))
             ),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             inline_comment_marker("jenkins-review-8", SHA, comment),
             inline_comment_marker("jenkins-review-9", SHA, comment),
+        )
+        self.assertNotEqual(
+            inline_comment_marker(
+                "jenkins-review-8", SHA, comment, run_scoped=True
+            ),
+            inline_comment_marker(
+                "jenkins-review-9", SHA, comment, run_scoped=True
+            ),
         )
         self.assertIn(
             "AI_CODE_REVIEW_START",
@@ -117,9 +126,14 @@ class GitLabPublicationTests(unittest.TestCase):
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_summary_timeout_is_confirmed_without_duplicate_post(self, _user):
         timeout = GitLabAPIError("timeout", retryable=True, retry_delay=1)
+        completed_body = (
+            summary_note_marker("jenkins-review-8", SHA)
+            + "\n"
+            + review_done_marker(SHA)
+        )
         with patch(
             "utils.common._find_note_by_marker",
-            side_effect=[None, {"id": 23, "body": "marked"}],
+            side_effect=[None, {"id": 23, "body": completed_body}],
         ) as find, patch(
             "utils.common.post_summary_note", side_effect=timeout
         ) as post, patch("utils.common.time.sleep"):
@@ -136,6 +150,29 @@ class GitLabPublicationTests(unittest.TestCase):
         self.assertEqual(find.call_count, 2)
         post.assert_called_once()
         self.assertIn("AI_CODE_REVIEW_SUMMARY", post.call_args.args[-1])
+        self.assertIn("AI_CODE_REVIEW_DONE", post.call_args.args[-1])
+
+    @patch("utils.common.current_gitlab_user_id", return_value=7)
+    def test_incomplete_existing_summary_stops_without_reposting(self, _user):
+        incomplete = {
+            "id": 23,
+            "body": summary_note_marker("jenkins-review-8", SHA),
+        }
+        with patch(
+            "utils.common._find_note_by_marker", return_value=incomplete
+        ), patch("utils.common.post_summary_note") as post:
+            with self.assertRaises(GitLabPublicationUncertainError):
+                post_review_summary_note(
+                    "https://gitlab.example",
+                    "token",
+                    5,
+                    12,
+                    "summary",
+                    "jenkins-review-8",
+                    SHA,
+                )
+
+        post.assert_not_called()
 
     @patch("utils.common.current_gitlab_user_id", return_value=7)
     def test_summary_retries_only_after_confirmed_absence(self, _user):
@@ -248,7 +285,7 @@ class GitLabPublicationTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_completed_summary_keeps_run_marker_and_done_marker(self):
+    def test_completed_summary_is_posted_once_before_done_label(self):
         with tempfile.TemporaryDirectory() as directory:
             comment = self._write_review_files(directory)
             previous = os.getcwd()
@@ -272,18 +309,23 @@ class GitLabPublicationTests(unittest.TestCase):
                     "utils.publish_review.current_gitlab_user_id", return_value=7
                 ), patch(
                     "utils.publish_review.post_inline_comment"
-                ), patch(
+                ) as post_inline, patch(
                     "utils.publish_review.post_review_summary_note",
                     return_value={"id": 25},
-                ), patch(
+                ) as post_summary, patch(
                     "utils.publish_review.update_mr_labels"
-                ), patch(
-                    "utils.publish_review.update_mr_note"
-                ) as update_note:
+                ) as labels:
                     publish_review()
-                completed_body = update_note.call_args.args[-1]
-                self.assertIn("AI_CODE_REVIEW_SUMMARY", completed_body)
-                self.assertIn("AI_CODE_REVIEW_DONE", completed_body)
+                post_inline.assert_called_once()
+                post_summary.assert_called_once()
+                labels.assert_called_once_with(
+                    "https://gitlab.example",
+                    "token",
+                    "5",
+                    "12",
+                    add=["ai_code_review_done"],
+                    remove=["ai_code_reviewing", "ai_code_review_failed"],
+                )
             finally:
                 os.chdir(previous)
 

@@ -4,6 +4,7 @@ import os
 from utils.common import (
     GitLabPublicationUncertainError,
     current_gitlab_user_id,
+    force_review_requested,
     gitlab_base_url,
     inline_comment_marker,
     post_marked_discussion,
@@ -11,10 +12,7 @@ from utils.common import (
     publishing_enabled,
     read_text,
     required_env,
-    review_done_marker,
-    summary_note_marker,
     update_mr_labels,
-    update_mr_note,
     write_text,
 )
 from utils.diff_utils import latest_mr_version, parse_changed_lines
@@ -32,6 +30,7 @@ def post_inline_comment(
     build_tag,
     source_sha,
     bot_user_id,
+    run_scoped_marker=False,
 ):
     form = {
         "body": inline_body(comment),
@@ -47,7 +46,9 @@ def post_inline_comment(
     else:
         form["position[old_line]"] = position["old_line"]
 
-    marker = inline_comment_marker(build_tag, source_sha, comment)
+    marker = inline_comment_marker(
+        build_tag, source_sha, comment, run_scoped=run_scoped_marker
+    )
     return post_marked_discussion(
         base_url, token, project_id, mr_iid, form, marker, bot_user_id
     )
@@ -60,6 +61,7 @@ def main():
     project_id = os.environ.get("EFFECTIVE_PROJECT_ID", "").strip()
     build_tag = os.environ.get("BUILD_TAG", "").strip()
     publish = publishing_enabled()
+    force_new_round = force_review_requested()
 
     full_diff = read_text("mr.diff")
     with open("review-result.json", "r", encoding="utf-8") as handle:
@@ -120,6 +122,7 @@ def main():
                     build_tag,
                     source_sha,
                     bot_user_id,
+                    run_scoped_marker=force_new_round,
                 )
                 posted_count += 1
             except GitLabPublicationUncertainError:
@@ -156,9 +159,7 @@ def main():
     if publish:
         gitlab_token = required_env("GITLAB_API_TOKEN")
         base_url = gitlab_base_url(repository_url)
-        summary_marker = summary_note_marker(build_tag, source_sha)
-        published_summary = summary_note.rstrip() + "\n\n" + summary_marker + "\n"
-        summary_note_response = post_review_summary_note(
+        post_review_summary_note(
             base_url,
             gitlab_token,
             project_id,
@@ -175,24 +176,6 @@ def main():
             mr_iid,
             add=["ai_code_review_done"],
             remove=["ai_code_reviewing", "ai_code_review_failed"],
-        )
-        note_id = (
-            summary_note_response.get("id")
-            if isinstance(summary_note_response, dict)
-            else None
-        )
-        if not isinstance(note_id, int):
-            raise RuntimeError("GitLab did not return an ID for the summary note.")
-        update_mr_note(
-            base_url,
-            gitlab_token,
-            project_id,
-            mr_iid,
-            note_id,
-            published_summary.rstrip()
-            + "\n\n"
-            + review_done_marker(source_sha)
-            + "\n",
         )
 
     print(

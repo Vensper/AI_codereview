@@ -42,11 +42,43 @@ class ReviewStartTests(unittest.TestCase):
             "utils.review_start.publishing_context", return_value=("https://gitlab.example", "token", "5", "12")
         ), patch("utils.review_start.has_completed_review", return_value=True) as completed, patch(
             "utils.review_start.post_review_start_note"
-        ) as post, patch("utils.review_start.write_text") as write:
+        ) as post, patch("utils.review_start.update_mr_labels") as labels, patch(
+            "utils.review_start.write_text"
+        ) as write:
             review_start.main()
             completed.assert_called_once()
             post.assert_not_called()
+            labels.assert_called_once_with(
+                "https://gitlab.example",
+                "token",
+                "5",
+                "12",
+                add=["ai_code_review_done"],
+                remove=["ai_code_reviewing", "ai_code_review_failed"],
+            )
             write.assert_called_once_with("review-skip.flag", "already-completed\n")
+
+    def test_completed_review_label_repair_failure_does_not_skip(self):
+        environment = {
+            "EFFECTIVE_SOURCE_SHA": "a" * 40,
+            "BUILD_TAG": "jenkins-review-8",
+            "WEBHOOK_EVENT_KIND": "merge_request",
+        }
+        with patch.dict(os.environ, environment, clear=True), patch(
+            "utils.review_start.publishing_enabled", return_value=True
+        ), patch(
+            "utils.review_start.publishing_context",
+            return_value=("https://gitlab.example", "token", "5", "12"),
+        ), patch(
+            "utils.review_start.has_completed_review", return_value=True
+        ), patch(
+            "utils.review_start.update_mr_labels",
+            side_effect=RuntimeError("offline"),
+        ), patch("utils.review_start.write_text") as write:
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                review_start.main()
+
+        write.assert_not_called()
 
     def test_manual_force_review_still_bypasses_check(self):
         with patch.dict(os.environ, {"FORCE_REVIEW": "true"}, clear=True):

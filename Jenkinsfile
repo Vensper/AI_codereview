@@ -394,6 +394,8 @@ pipeline {
                         ]) {
                             bat '''
                                 @echo off
+                                rem Transitional compatibility: parameterized executor selection is added later.
+                                set "AI_EXECUTOR=deepseek"
                                 python -u -m utils.ai_review "../mr-premerge"
                             '''
                         }
