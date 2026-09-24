@@ -51,6 +51,31 @@ pipeline {
             defaultValue: false,
             description: '仅测试用：跳过 GitLab API diff，验证本地 Git diff 兜底路径。正式 Webhook 构建保持 false。'
         )
+        choice(
+            name: 'AI_PROVIDER',
+            choices: ['deepseek', 'custom'],
+            description: 'Claude Code 使用的模型服务。deepseek 直连国内官方 Anthropic 兼容接口；custom 用于其他 Anthropic 兼容接口或国内统一网关。'
+        )
+        string(
+            name: 'AI_BASE_URL',
+            defaultValue: '',
+            description: 'AI_PROVIDER=custom 时必填，填写 Anthropic Messages 兼容 HTTPS 根地址；deepseek 时忽略。'
+        )
+        string(
+            name: 'AI_MODEL',
+            defaultValue: '',
+            description: '模型名称。deepseek 留空时使用 deepseek-flash[1m]；custom 必填。'
+        )
+        choice(
+            name: 'AI_AUTH_STYLE',
+            choices: ['bearer', 'api_key'],
+            description: 'custom 接口鉴权方式：bearer 对应 Authorization: Bearer，api_key 对应 x-api-key；deepseek 时固定 bearer。'
+        )
+        string(
+            name: 'AI_CREDENTIAL_ID',
+            defaultValue: 'ai-model-custom-api-key',
+            description: '仅 custom 使用：以 ai-model- 开头的 Jenkins Secret text 凭据 ID。只填写凭据 ID，不要填写 API Key。'
+        )
     }
 
     options {
@@ -384,20 +409,63 @@ pipeline {
                             }
                         }
                     }
-                    script { env.REVIEW_FAILURE_STAGE = 'AI 审查' }
-                    dir('review-tool') {
-                        withCredentials([
-                            string(
-                                credentialsId: 'deepseek-api-key',
-                                variable: 'DEEPSEEK_API_KEY'
-                            )
-                        ]) {
-                            bat '''
-                                @echo off
-                                rem Transitional compatibility: parameterized executor selection is added later.
-                                set "AI_EXECUTOR=deepseek"
-                                python -u -m utils.ai_review "../mr-premerge"
-                            '''
+                    script {
+                        env.REVIEW_FAILURE_STAGE = '配置 AI 执行器'
+
+                        def provider = params.AI_PROVIDER?.trim()?.toLowerCase()
+                        def baseUrl = ''
+                        def model = params.AI_MODEL?.trim()
+                        def authStyle = params.AI_AUTH_STYLE?.trim()?.toLowerCase()
+                        def credentialId = ''
+
+                        if (provider == 'deepseek') {
+                            baseUrl = 'https://api.deepseek.com/anthropic'
+                            model = model ?: 'deepseek-flash[1m]'
+                            authStyle = 'bearer'
+                            credentialId = 'deepseek-api-key'
+                        } else if (provider == 'custom') {
+                            baseUrl = params.AI_BASE_URL?.trim()
+                            credentialId = params.AI_CREDENTIAL_ID?.trim()
+                            if (!baseUrl) {
+                                error('AI_PROVIDER=custom 时必须填写 AI_BASE_URL。')
+                            }
+                            if (!model) {
+                                error('AI_PROVIDER=custom 时必须填写 AI_MODEL。')
+                            }
+                            if (!(authStyle in ['bearer', 'api_key'])) {
+                                error('AI_AUTH_STYLE 只能是 bearer 或 api_key。')
+                            }
+                            if (!(credentialId ==~ /^ai-model-[A-Za-z0-9._-]+$/)) {
+                                error('custom 的 AI_CREDENTIAL_ID 必须以 ai-model- 开头，且只能包含字母、数字、点、下划线和连字符。')
+                            }
+                        } else {
+                            error("不支持的 AI_PROVIDER：${provider ?: '(empty)'}。")
+                        }
+
+                        if (!(baseUrl ==~ /^https:\/\/[^\s?#]+\/?$/)) {
+                            error('AI_BASE_URL 必须是无查询参数、无片段的 HTTPS 地址。')
+                        }
+                        echo "AI executor: Claude Code CLI; provider=${provider}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
+                        env.REVIEW_FAILURE_STAGE = 'AI 审查'
+                        dir('review-tool') {
+                            withCredentials([
+                                string(
+                                    credentialsId: credentialId,
+                                    variable: 'AI_API_KEY'
+                                )
+                            ]) {
+                                withEnv([
+                                    'AI_EXECUTOR=claude',
+                                    "AI_BASE_URL=${baseUrl}",
+                                    "AI_MODEL_OVERRIDE=${model}",
+                                    "AI_AUTH_STYLE=${authStyle}"
+                                ]) {
+                                    bat '''
+                                        @echo off
+                                        python -u -m utils.ai_review "../mr-premerge"
+                                    '''
+                                }
+                            }
                         }
                     }
                 }
