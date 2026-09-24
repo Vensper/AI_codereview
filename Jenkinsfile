@@ -52,14 +52,24 @@ pipeline {
             description: '仅测试用：跳过 GitLab API diff，验证本地 Git diff 兜底路径。正式 Webhook 构建保持 false。'
         )
         choice(
+            name: 'AI_EXECUTOR',
+            choices: ['claude', 'codex', 'opencode'],
+            description: 'AI CLI 执行器。默认 Claude Code；也可选择 Codex CLI 或 OpenCode CLI。'
+        )
+        choice(
             name: 'AI_PROVIDER',
             choices: ['deepseek', 'custom'],
-            description: 'Claude Code 使用的模型服务。deepseek 直连国内官方 Anthropic 兼容接口；custom 用于其他 Anthropic 兼容接口或国内统一网关。'
+            description: '模型服务。deepseek 根据执行器自动选择国内官方兼容接口；custom 用于其他兼容接口或国内统一网关。'
+        )
+        choice(
+            name: 'AI_API_PROTOCOL',
+            choices: ['auto', 'anthropic', 'openai_responses', 'openai_chat'],
+            description: '接口协议。deepseek 使用 auto；custom 的 auto 会采用所选执行器的默认协议，也可显式指定。'
         )
         string(
             name: 'AI_BASE_URL',
             defaultValue: '',
-            description: 'AI_PROVIDER=custom 时必填，填写 Anthropic Messages 兼容 HTTPS 根地址；deepseek 时忽略。'
+            description: 'AI_PROVIDER=custom 时必填，填写与所选协议兼容的 HTTPS 根地址；deepseek 时忽略。'
         )
         string(
             name: 'AI_MODEL',
@@ -412,17 +422,33 @@ pipeline {
                     script {
                         env.REVIEW_FAILURE_STAGE = '配置 AI 执行器'
 
+                        def executor = params.AI_EXECUTOR?.trim()?.toLowerCase()
                         def provider = params.AI_PROVIDER?.trim()?.toLowerCase()
                         def baseUrl = ''
                         def model = params.AI_MODEL?.trim()
+                        def protocol = params.AI_API_PROTOCOL?.trim()?.toLowerCase()
                         def authStyle = params.AI_AUTH_STYLE?.trim()?.toLowerCase()
                         def credentialId = ''
+                        def opencodeCacheHome = env.OPENCODE_CACHE_HOME?.trim() ?: "${env.WORKSPACE}\\.opencode-provider-cache"
+
+                        if (!(executor in ['claude', 'codex', 'opencode'])) {
+                            error("不支持的 AI_EXECUTOR：${executor ?: '(empty)'}。")
+                        }
 
                         if (provider == 'deepseek') {
-                            baseUrl = 'https://api.deepseek.com/anthropic'
                             model = model ?: 'deepseek-flash[1m]'
                             authStyle = 'bearer'
                             credentialId = 'deepseek-api-key'
+                            if (executor == 'claude') {
+                                baseUrl = 'https://api.deepseek.com/anthropic'
+                                protocol = 'anthropic'
+                            } else if (executor == 'codex') {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_responses'
+                            } else {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_chat'
+                            }
                         } else if (provider == 'custom') {
                             baseUrl = params.AI_BASE_URL?.trim()
                             credentialId = params.AI_CREDENTIAL_ID?.trim()
@@ -438,14 +464,35 @@ pipeline {
                             if (!(credentialId ==~ /^ai-model-[A-Za-z0-9._-]+$/)) {
                                 error('custom 的 AI_CREDENTIAL_ID 必须以 ai-model- 开头，且只能包含字母、数字、点、下划线和连字符。')
                             }
+                            if (protocol == 'auto') {
+                                if (executor == 'claude') {
+                                    protocol = 'anthropic'
+                                } else if (executor == 'codex') {
+                                    protocol = 'openai_responses'
+                                } else {
+                                    protocol = 'openai_chat'
+                                }
+                            }
                         } else {
                             error("不支持的 AI_PROVIDER：${provider ?: '(empty)'}。")
+                        }
+
+                        def supportedProtocols = [
+                            claude: ['anthropic'],
+                            codex: ['openai_responses'],
+                            opencode: ['openai_chat', 'openai_responses']
+                        ]
+                        if (!(protocol in supportedProtocols[executor])) {
+                            error("AI_EXECUTOR=${executor} 不支持 AI_API_PROTOCOL=${protocol}；允许值：${supportedProtocols[executor].join(', ')}。")
+                        }
+                        if (executor == 'opencode' && authStyle != 'bearer') {
+                            error('OpenCode 的 OpenAI 兼容提供方当前只支持 AI_AUTH_STYLE=bearer。')
                         }
 
                         if (!(baseUrl ==~ /^https:\/\/[^\s?#]+\/?$/)) {
                             error('AI_BASE_URL 必须是无查询参数、无片段的 HTTPS 地址。')
                         }
-                        echo "AI executor: Claude Code CLI; provider=${provider}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
+                        echo "AI executor=${executor}; provider=${provider}; protocol=${protocol}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
                         env.REVIEW_FAILURE_STAGE = 'AI 审查'
                         dir('review-tool') {
                             withCredentials([
@@ -455,10 +502,12 @@ pipeline {
                                 )
                             ]) {
                                 withEnv([
-                                    'AI_EXECUTOR=claude',
+                                    "AI_EXECUTOR=${executor}",
                                     "AI_BASE_URL=${baseUrl}",
                                     "AI_MODEL_OVERRIDE=${model}",
-                                    "AI_AUTH_STYLE=${authStyle}"
+                                    "AI_API_PROTOCOL=${protocol}",
+                                    "AI_AUTH_STYLE=${authStyle}",
+                                    "OPENCODE_CACHE_HOME=${opencodeCacheHome}"
                                 ]) {
                                     bat '''
                                         @echo off

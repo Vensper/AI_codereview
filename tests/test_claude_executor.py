@@ -2,7 +2,13 @@ import json
 import unittest
 from unittest.mock import patch
 
-from utils.ai_executors import DEFAULT_EXECUTOR, executor_name_from_env
+from utils.ai_executors import (
+    DEFAULT_EXECUTOR,
+    CodexCliExecutor,
+    OpenCodeCliExecutor,
+    create_cli_executor,
+    executor_name_from_env,
+)
 from utils.ai_executors.base import (
     ExecutionBudget,
     ExecutionBudgetExceeded,
@@ -30,6 +36,14 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
         self.assertEqual(DEFAULT_EXECUTOR, "claude")
         self.assertEqual(executor_name_from_env({}), "claude")
         self.assertEqual(executor_name_from_env({"AI_EXECUTOR": "deepseek"}), "deepseek")
+        self.assertEqual(executor_name_from_env({"AI_EXECUTOR": "codex"}), "codex")
+        self.assertEqual(
+            executor_name_from_env({"AI_EXECUTOR": "opencode"}), "opencode"
+        )
+        self.assertIsInstance(create_cli_executor("codex", environ={}), CodexCliExecutor)
+        self.assertIsInstance(
+            create_cli_executor("opencode", environ={}), OpenCodeCliExecutor
+        )
 
     @patch("utils.ai_executors.claude_code.run_process")
     @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")

@@ -23,7 +23,7 @@ GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新
 
 开始通知使用同样的隐藏标识确认和安全重试。开始通知或 `ai_code_reviewing` 标签暂时无法写入时，流水线记录警告并继续 AI 审查；普通 MR 事件的完成查重查询仍必须成功，避免在无法确认历史状态时重复审查。
 
-AI 审查固定由 Jenkins Agent 上的基础 Claude Code CLI 执行。构建参数 `AI_PROVIDER` 默认选择 `deepseek`，通过 DeepSeek 官方 Anthropic 兼容地址直连，并使用现有 `deepseek-api-key` 凭据；选择 `custom` 时，可填写其他 Anthropic Messages 兼容接口，或填写部署在国内网络中的统一模型网关地址，并引用以 `ai-model-` 开头的专用 Jenkins Secret text 凭据。API Key 不进入普通参数或日志。调查阶段允许 Claude Code 只读检索预合并工作区，最终阶段通过 `review.schema.json` 约束结构化输出；结果还会使用同一份 Schema 在本地校验，首次输出不完整或被截断时重试一次，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
+AI 审查由 Jenkins Agent 上 npm 默认安装的 Claude Code、Codex CLI 或 OpenCode CLI 执行，构建参数 `AI_EXECUTOR` 默认选择 `claude`。`AI_PROVIDER=deepseek` 时，流水线按执行器自动选择 DeepSeek 官方 Anthropic、OpenAI Responses 或 OpenAI Chat 兼容接口，并使用现有 `deepseek-api-key`；`custom` 可连接其他兼容接口或部署在国内网络中的统一模型网关，并引用以 `ai-model-` 开头的专用 Jenkins Secret text 凭据。API Key 不进入普通参数、命令行或日志。调查阶段仅允许只读检索预合并工作区，最终阶段禁用工具；三个执行器共用 `review.schema.json`、本地校验和一次重试，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
 
 若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
 

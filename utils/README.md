@@ -26,12 +26,26 @@ Jenkins 只调用以下阶段入口；一个入口只完成一个流水线阶段
 普通自动构建的行级评论标记按源提交和评论内容保持跨构建稳定，失败后的下一次构建
 可以复用已成功发布的 Discussion；强制审查使用构建级标记，允许明确创建新一轮评论。
 
-## Claude Code AI 执行器
+## AI CLI 执行器
 
-Jenkins 固定设置 `AI_EXECUTOR=claude`，Agent 只需安装基础 Claude Code CLI。
-`AI_PROVIDER=deepseek`（默认）直连 `https://api.deepseek.com/anthropic`，
-默认模型为 `deepseek-flash[1m]`；`AI_PROVIDER=custom` 可连接其他厂商的
-Anthropic Messages 兼容接口，或部署在国内网络中的统一模型网关。
+Jenkins 构建参数 `AI_EXECUTOR` 提供 `claude`、`codex`、`opencode` 三种 CLI，
+默认 `claude`。Agent 只需通过 npm 默认方式安装对应基础 CLI，不安装 LiteLLM、协议转换器
+或其他附加 CLI。OpenCode 会按自身标准机制按需缓存模型提供方运行包；流水线将缓存放在
+Jenkins 工作区的 `.opencode-provider-cache`；若 Agent 管理员预设 `OPENCODE_CACHE_HOME`，
+则优先使用该目录以便跨构建复用。国内或企业网络需要 npm 镜像时，由 Agent 管理员设置
+`OPENCODE_NPM_REGISTRY`，执行器会将它传给 OpenCode 的包管理过程。
+
+| 执行器 | DeepSeek 自动协议 | custom 可用协议 | 结构化输出 |
+| --- | --- | --- | --- |
+| `claude` | Anthropic Messages | `anthropic` | CLI `--json-schema` + 本地 Schema |
+| `codex` | OpenAI Responses | `openai_responses` | CLI `--output-schema` + 本地 Schema |
+| `opencode` | OpenAI Chat | `openai_chat`、`openai_responses` | 严格 JSON 提示词 + 本地 Schema |
+
+`AI_PROVIDER=deepseek`（默认）会根据执行器自动选择 `https://api.deepseek.com/anthropic`
+或 `https://api.deepseek.com`，默认模型为 `deepseek-flash[1m]`。
+`AI_PROVIDER=custom` 使用 `AI_BASE_URL`、`AI_MODEL` 和 `AI_API_PROTOCOL` 接入其他厂商的
+兼容接口，或部署在国内网络中的统一模型网关。不兼容所选 CLI 的协议会在调用模型前失败，
+不会静默切换执行器或回退旧 API 流程。
 
 DeepSeek 固定使用现有 Jenkins Secret text 凭据 `deepseek-api-key`。`custom` 模式必须填写
 `AI_BASE_URL`、`AI_MODEL` 和以 `ai-model-` 开头的专用 `AI_CREDENTIAL_ID`，并通过
@@ -40,11 +54,17 @@ Jenkins Credentials 在执行阶段注入，不能填写到普通构建参数中
 自定义地址误用 GitLab 等与模型无关的 Jenkins 凭据。
 
 Python 入口未设置 `AI_EXECUTOR` 时仍默认 `claude`；当前还接受 `deepseek`，仅兼容旧的
-直接 API 调用和人工排障，不再由 Jenkins 正常流水线使用。
-Claude Code 使用 `AI_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY` 认证，
-可用 `AI_BASE_URL` 指向 Anthropic Messages 兼容网关、用 `AI_MODEL_OVERRIDE` 指定模型。
-`AI_API_KEY` 默认映射到 `x-api-key`；Bearer 网关需同时设置 `AI_AUTH_STYLE=bearer`。
-执行器只启用 Read、Glob、Grep，禁用 `.git` 读取、插件、MCP、命令执行、写入和会话持久化。
+直接 API 调用和人工排障，不再由 Jenkins 正常流水线使用。三个 CLI 都从 `AI_API_KEY`
+读取 Jenkins 注入的密钥，并使用 `AI_BASE_URL`、`AI_MODEL_OVERRIDE`、`AI_API_PROTOCOL`
+和 `AI_AUTH_STYLE`。Claude 支持 Bearer 与 `x-api-key`；Codex 支持 Responses 协议下的
+Bearer 与 `x-api-key`；OpenCode 的 OpenAI 兼容提供方当前要求 Bearer。
+
+Claude 只启用 Read、Glob、Grep。Codex 使用 `--sandbox read-only`、`--ephemeral`、
+`--ignore-user-config` 和 `--ignore-rules`，并关闭更新检查、分析和子代理。OpenCode 使用独立
+XDG 配置/数据/缓存/状态目录、最高优先级内联配置、`--pure` 和项目配置禁用标志；调查阶段
+只允许 Read、Glob、Grep，最终阶段禁用全部工具。为规避仓库自带插件在部分 OpenCode 版本
+中的加载风险，预合并根目录存在 `opencode.json`、`opencode.jsonc` 或 `.opencode` 时，
+OpenCode 执行器会明确失败，用户可选择 Claude/Codex 或移除该配置后再审查。
 
 每次 AI 审查共用一个 600 秒单调时钟截止时间：调查阶段最多 480 秒，进入最终生成后
 最多再使用 120 秒，且不能越过总截止时间。64 个可观测模型轮次和 128 次可观测工具调用

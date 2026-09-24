@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 
 import utils.review_agent_tools as agent_tools
-from utils.ai_executors import ClaudeCodeExecutor, executor_name_from_env
+from utils.ai_executors import create_cli_executor, executor_name_from_env
 from utils.ai_executors.base import (
     ExecutionBudget,
     ExecutionBudgetExceeded,
@@ -401,9 +401,9 @@ def main():
     deadline = ReviewDeadline()
     budget = ExecutionBudget()
 
-    if executor_name == "claude":
+    if executor_name != "deepseek":
         schema = load_review_schema()
-        executor = ClaudeCodeExecutor()
+        executor = create_cli_executor(executor_name)
 
         try:
             investigation = executor.investigate(
