@@ -1,4 +1,5 @@
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -141,6 +142,122 @@ class ExecutionBudget:
             "max_model_rounds": self.max_rounds,
             "max_tool_calls": self.max_tool_calls,
         }
+
+
+class CliExecutorBase:
+    """Shared process-result handling for the supported review CLIs.
+
+    Subclasses keep ownership of command construction, isolated environments,
+    stream parsing and structured-output decoding.  This class only centralizes
+    the lifecycle rules that must stay identical across executors.
+    """
+
+    name = ""
+    display_name = "AI CLI"
+    command_environment = ""
+    default_command = ""
+
+    def __init__(self, environ=None, command=None):
+        self.environ = dict(os.environ if environ is None else environ)
+        self.command = command or self.environ.get(
+            self.command_environment, self.default_command
+        )
+        self._trace = []
+
+    def _executable(self):
+        executable = shutil.which(self.command, path=self.environ.get("PATH"))
+        if not executable:
+            raise RuntimeError(
+                f"{self.display_name} executable was not found: {self.command!r}."
+            )
+        return executable
+
+    def _record_trace(self, phase, status, completed, budget, started, attempt=None):
+        entry = {
+            "executor": self.name,
+            "phase": phase,
+        }
+        if attempt is not None:
+            entry["attempt"] = attempt + 1
+        entry.update(
+            {
+                "status": status,
+                "return_code": completed.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                **budget.snapshot(),
+            }
+        )
+        self._trace.append(entry)
+
+    def _complete_investigation(
+        self, completed, text, secrets, budget, started
+    ):
+        if completed.timed_out:
+            status = "investigation_timeout"
+        elif isinstance(completed.monitor_error, ExecutionBudgetExceeded):
+            status = "investigation_fuse"
+        elif completed.monitor_error is not None:
+            raise RuntimeError(
+                f"Cannot monitor {self.display_name} output: "
+                f"{completed.monitor_error}"
+            )
+        elif completed.returncode != 0:
+            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            raise RuntimeError(
+                f"{self.display_name} investigation exited with code "
+                f"{completed.returncode}: {detail or 'no stderr output'}"
+            )
+        else:
+            status = "ok"
+
+        self._record_trace(
+            "investigation", status, completed, budget, started
+        )
+        return text
+
+    def _complete_finalization(
+        self,
+        completed,
+        text,
+        secrets,
+        budget,
+        started,
+        attempt,
+        *,
+        require_text=True,
+    ):
+        status = "ok" if completed.returncode == 0 else "error"
+        if completed.timed_out:
+            status = "timeout"
+        self._record_trace(
+            "finalization",
+            status,
+            completed,
+            budget,
+            started,
+            attempt=attempt,
+        )
+        if completed.timed_out:
+            raise ReviewDeadlineExceeded(
+                f"{self.display_name} finalization reached the AI review deadline."
+            )
+        if completed.monitor_error is not None:
+            raise completed.monitor_error
+        if completed.returncode != 0:
+            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            raise RuntimeError(
+                f"{self.display_name} finalization exited with code "
+                f"{completed.returncode}: {detail or 'no stderr output'}"
+            )
+        if require_text and not text:
+            raise ValueError(f"{self.display_name} returned no structured output.")
+        return text
+
+    def get_trace(self):
+        return list(self._trace)
+
+    def close(self):
+        """Release optional executor resources; most executors have none."""
 
 
 @dataclass

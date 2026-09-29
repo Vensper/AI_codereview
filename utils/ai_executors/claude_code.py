@@ -1,13 +1,9 @@
 import json
-import os
-import shutil
 import time
 
 from utils.ai_executors.base import (
-    ExecutionBudgetExceeded,
-    ReviewDeadlineExceeded,
+    CliExecutorBase,
     isolated_child_environment,
-    redact,
     run_process,
 )
 
@@ -66,13 +62,14 @@ class _ClaudeStreamObserver:
         return (self.result or "\n".join(self.text_parts)).strip()
 
 
-class ClaudeCodeExecutor:
+class ClaudeCodeExecutor(CliExecutorBase):
     name = "claude"
+    display_name = "Claude Code"
+    command_environment = "CLAUDE_CODE_COMMAND"
+    default_command = "claude"
 
     def __init__(self, environ=None, command=None):
-        self.environ = dict(os.environ if environ is None else environ)
-        self.command = command or self.environ.get("CLAUDE_CODE_COMMAND", "claude")
-        self._trace = []
+        super().__init__(environ=environ, command=command)
 
     def _environment(self):
         api_key = self.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -106,14 +103,6 @@ class ClaudeCodeExecutor:
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
         return isolated_child_environment(self.environ, extra), [api_key, auth_token]
-
-    def _executable(self):
-        executable = shutil.which(self.command, path=self.environ.get("PATH"))
-        if not executable:
-            raise RuntimeError(
-                f"Claude Code executable was not found: {self.command!r}."
-            )
-        return executable
 
     def _command(self, *, tools_enabled, output_format, schema=None):
         command = [
@@ -195,34 +184,13 @@ class ClaudeCodeExecutor:
         except OSError as exc:
             raise RuntimeError(f"Cannot start Claude Code: {exc}") from exc
 
-        if completed.timed_out:
-            status = "investigation_timeout"
-        elif isinstance(completed.monitor_error, ExecutionBudgetExceeded):
-            status = "investigation_fuse"
-        elif completed.monitor_error is not None:
-            raise RuntimeError(
-                f"Cannot monitor Claude Code output: {completed.monitor_error}"
-            )
-        elif completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
-            raise RuntimeError(
-                f"Claude Code investigation exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
-            )
-        else:
-            status = "ok"
-
-        self._trace.append(
-            {
-                "executor": self.name,
-                "phase": "investigation",
-                "status": status,
-                "return_code": completed.returncode,
-                "duration_seconds": round(time.monotonic() - started, 3),
-                **budget.snapshot(),
-            }
+        return self._complete_investigation(
+            completed,
+            observer.investigation_text(),
+            secrets,
+            budget,
+            started,
         )
-        return observer.investigation_text()
 
     def finalize(self, prompt, workspace, schema, timeout_seconds, budget, attempt=0):
         budget.consume_round()
@@ -243,34 +211,13 @@ class ClaudeCodeExecutor:
         except OSError as exc:
             raise RuntimeError(f"Cannot start Claude Code: {exc}") from exc
 
-        duration = round(time.monotonic() - started, 3)
-        status = "ok" if completed.returncode == 0 else "error"
-        if completed.timed_out:
-            status = "timeout"
-        self._trace.append(
-            {
-                "executor": self.name,
-                "phase": "finalization",
-                "attempt": attempt + 1,
-                "status": status,
-                "return_code": completed.returncode,
-                "duration_seconds": duration,
-                **budget.snapshot(),
-            }
+        raw_output = self._complete_finalization(
+            completed,
+            completed.stdout.strip(),
+            secrets,
+            budget,
+            started,
+            attempt,
+            require_text=False,
         )
-        if completed.timed_out:
-            raise ReviewDeadlineExceeded(
-                "Claude Code finalization reached the AI review deadline."
-            )
-        if completed.monitor_error is not None:
-            raise completed.monitor_error
-        if completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
-            raise RuntimeError(
-                f"Claude Code finalization exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
-            )
-        return self._structured_text(completed.stdout.strip())
-
-    def get_trace(self):
-        return list(self._trace)
+        return self._structured_text(raw_output)

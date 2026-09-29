@@ -1,14 +1,11 @@
 import json
 import os
-import shutil
 import tempfile
 import time
 
 from utils.ai_executors.base import (
-    ExecutionBudgetExceeded,
-    ReviewDeadlineExceeded,
+    CliExecutorBase,
     isolated_child_environment,
-    redact,
     run_process,
 )
 from utils.ai_executors.settings import cli_model_settings
@@ -61,13 +58,14 @@ class _OpenCodeStreamObserver:
         return "\n".join(self.text_parts.values()).strip()
 
 
-class OpenCodeCliExecutor:
+class OpenCodeCliExecutor(CliExecutorBase):
     name = "opencode"
+    display_name = "OpenCode CLI"
+    command_environment = "OPENCODE_CLI_COMMAND"
+    default_command = "opencode"
 
     def __init__(self, environ=None, command=None):
-        self.environ = dict(os.environ if environ is None else environ)
-        self.command = command or self.environ.get("OPENCODE_CLI_COMMAND", "opencode")
-        self._trace = []
+        super().__init__(environ=environ, command=command)
         self._temporary_cache = None
 
     def _settings(self):
@@ -82,14 +80,6 @@ class OpenCodeCliExecutor:
                 "OpenAI-compatible providers."
             )
         return settings
-
-    def _executable(self):
-        executable = shutil.which(self.command, path=self.environ.get("PATH"))
-        if not executable:
-            raise RuntimeError(
-                f"OpenCode CLI executable was not found: {self.command!r}."
-            )
-        return executable
 
     @staticmethod
     def _config(settings, tools_enabled):
@@ -226,34 +216,9 @@ class OpenCodeCliExecutor:
         except OSError as exc:
             raise RuntimeError(f"Cannot start OpenCode CLI: {exc}") from exc
 
-        if completed.timed_out:
-            status = "investigation_timeout"
-        elif isinstance(completed.monitor_error, ExecutionBudgetExceeded):
-            status = "investigation_fuse"
-        elif completed.monitor_error is not None:
-            raise RuntimeError(
-                f"Cannot monitor OpenCode CLI output: {completed.monitor_error}"
-            )
-        elif completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
-            raise RuntimeError(
-                f"OpenCode CLI investigation exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
-            )
-        else:
-            status = "ok"
-
-        self._trace.append(
-            {
-                "executor": self.name,
-                "phase": "investigation",
-                "status": status,
-                "return_code": completed.returncode,
-                "duration_seconds": round(time.monotonic() - started, 3),
-                **budget.snapshot(),
-            }
+        return self._complete_investigation(
+            completed, text, secrets, budget, started
         )
-        return text
 
     def finalize(self, prompt, workspace, schema, timeout_seconds, budget, attempt=0):
         del schema  # OpenCode 1.18.31 has no native output-schema CLI option.
@@ -265,38 +230,9 @@ class OpenCodeCliExecutor:
         except OSError as exc:
             raise RuntimeError(f"Cannot start OpenCode CLI: {exc}") from exc
 
-        status = "ok" if completed.returncode == 0 else "error"
-        if completed.timed_out:
-            status = "timeout"
-        self._trace.append(
-            {
-                "executor": self.name,
-                "phase": "finalization",
-                "attempt": attempt + 1,
-                "status": status,
-                "return_code": completed.returncode,
-                "duration_seconds": round(time.monotonic() - started, 3),
-                **budget.snapshot(),
-            }
+        return self._complete_finalization(
+            completed, text, secrets, budget, started, attempt
         )
-        if completed.timed_out:
-            raise ReviewDeadlineExceeded(
-                "OpenCode CLI finalization reached the AI review deadline."
-            )
-        if completed.monitor_error is not None:
-            raise completed.monitor_error
-        if completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
-            raise RuntimeError(
-                f"OpenCode CLI finalization exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
-            )
-        if not text:
-            raise ValueError("OpenCode CLI returned no structured output.")
-        return text
-
-    def get_trace(self):
-        return list(self._trace)
 
     def close(self):
         if self._temporary_cache is not None:

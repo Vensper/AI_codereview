@@ -46,7 +46,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
         )
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_investigation_is_read_only_and_counts_observable_usage(
         self, _which, run_process
     ):
@@ -87,7 +87,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
         self.assertIn("Read(.git/**)", command)
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_finalization_disables_tools_and_uses_schema_without_secret_leak(
         self, _which, run_process
     ):
@@ -141,7 +141,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", environment)
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_nonzero_final_exit_redacts_credential(self, _which, run_process):
         run_process.return_value = ProcessResult(
             1, "", "authentication failed for top-secret"
@@ -156,7 +156,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
             )
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_investigation_timeout_continues_with_partial_draft(
         self, _which, run_process
     ):
@@ -183,7 +183,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
         )
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_finalization_timeout_is_fatal(self, _which, run_process):
         run_process.return_value = ProcessResult(1, "", "", timed_out=True)
         executor = ClaudeCodeExecutor(
@@ -196,7 +196,7 @@ class ClaudeCodeExecutorTests(unittest.TestCase):
             )
 
     @patch("utils.ai_executors.claude_code.run_process")
-    @patch("utils.ai_executors.claude_code.shutil.which", return_value=r"C:\bin\claude.cmd")
+    @patch("utils.ai_executors.base.shutil.which", return_value=r"C:\bin\claude.cmd")
     def test_observer_fuse_ends_investigation(self, _which, run_process):
         budget = ExecutionBudget(max_rounds=1, max_tool_calls=128)
 

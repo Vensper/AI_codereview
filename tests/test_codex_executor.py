@@ -29,7 +29,7 @@ class CodexCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.codex_cli.run_process")
     @patch(
-        "utils.ai_executors.codex_cli.shutil.which",
+        "utils.ai_executors.base.shutil.which",
         return_value=r"C:\bin\codex.cmd",
     )
     def test_investigation_is_ephemeral_read_only_and_counts_events(
@@ -75,7 +75,7 @@ class CodexCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.codex_cli.run_process")
     @patch(
-        "utils.ai_executors.codex_cli.shutil.which",
+        "utils.ai_executors.base.shutil.which",
         return_value=r"C:\bin\codex.cmd",
     )
     def test_finalization_uses_native_output_schema(self, _which, run_process):
@@ -104,7 +104,7 @@ class CodexCliExecutorTests(unittest.TestCase):
         self.assertTrue(schema_path.endswith("review.schema.json"))
 
     @patch(
-        "utils.ai_executors.codex_cli.shutil.which",
+        "utils.ai_executors.base.shutil.which",
         return_value=r"C:\bin\codex.cmd",
     )
     def test_api_key_auth_uses_header_environment_reference(self, _which):
@@ -128,7 +128,7 @@ class CodexCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.codex_cli.run_process")
     @patch(
-        "utils.ai_executors.codex_cli.shutil.which",
+        "utils.ai_executors.base.shutil.which",
         return_value=r"C:\bin\codex.cmd",
     )
     def test_nonzero_exit_redacts_credential(self, _which, run_process):

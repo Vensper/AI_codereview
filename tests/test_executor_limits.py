@@ -2,8 +2,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from utils.ai_executors.base import (
+    CliExecutorBase,
     ExecutionBudget,
     ExecutionBudgetExceeded,
+    ProcessResult,
     ReviewDeadline,
     ReviewDeadlineExceeded,
     terminate_process_tree,
@@ -19,6 +21,13 @@ class FakeClock:
 
     def advance(self, seconds):
         self.now += seconds
+
+
+class ExampleCliExecutor(CliExecutorBase):
+    name = "example"
+    display_name = "Example CLI"
+    command_environment = "EXAMPLE_COMMAND"
+    default_command = "example"
 
 
 class ExecutorLimitTests(unittest.TestCase):
@@ -53,6 +62,73 @@ class ExecutorLimitTests(unittest.TestCase):
             budget.consume_round()
         with self.assertRaises(ExecutionBudgetExceeded):
             budget.consume_tool_calls()
+
+    @patch("utils.ai_executors.base.time.monotonic", return_value=12.5)
+    def test_shared_cli_base_records_investigation_trace(self, _clock):
+        executor = ExampleCliExecutor(environ={"PATH": r"C:\bin"})
+        budget = ExecutionBudget()
+        budget.consume_round()
+
+        text = executor._complete_investigation(
+            ProcessResult(0, "", ""),
+            "draft",
+            [],
+            budget,
+            started=10.0,
+        )
+
+        self.assertEqual(text, "draft")
+        self.assertEqual(
+            executor.get_trace(),
+            [
+                {
+                    "executor": "example",
+                    "phase": "investigation",
+                    "status": "ok",
+                    "return_code": 0,
+                    "duration_seconds": 2.5,
+                    "model_rounds": 1,
+                    "tool_calls": 0,
+                    "max_model_rounds": 64,
+                    "max_tool_calls": 128,
+                }
+            ],
+        )
+
+    def test_shared_cli_base_finalization_timeout_is_traced_and_fatal(self):
+        executor = ExampleCliExecutor(environ={"PATH": r"C:\bin"})
+        completed = ProcessResult(-1, "", "", timed_out=True)
+
+        with self.assertRaisesRegex(
+            ReviewDeadlineExceeded, "Example CLI finalization"
+        ):
+            executor._complete_finalization(
+                completed,
+                "",
+                [],
+                ExecutionBudget(),
+                started=0.0,
+                attempt=1,
+            )
+
+        trace = executor.get_trace()[0]
+        self.assertEqual(trace["phase"], "finalization")
+        self.assertEqual(trace["attempt"], 2)
+        self.assertEqual(trace["status"], "timeout")
+
+    def test_shared_cli_base_redacts_finalization_failure(self):
+        executor = ExampleCliExecutor(environ={"PATH": r"C:\bin"})
+        completed = ProcessResult(1, "", "credential=top-secret")
+
+        with self.assertRaisesRegex(RuntimeError, r"credential=\*\*\*"):
+            executor._complete_finalization(
+                completed,
+                "",
+                ["top-secret"],
+                ExecutionBudget(),
+                started=0.0,
+                attempt=0,
+            )
 
     @patch("utils.ai_executors.base.subprocess.run")
     @patch("utils.ai_executors.base.os.name", "nt")
