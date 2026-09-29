@@ -1,11 +1,14 @@
 import json
 import os
+import shutil
 import tempfile
 import time
 
 from utils.ai_executors.base import (
-    CliExecutorBase,
+    ExecutionBudgetExceeded,
+    ReviewDeadlineExceeded,
     isolated_child_environment,
+    redact,
     run_process,
 )
 from utils.ai_executors.settings import cli_model_settings
@@ -56,14 +59,13 @@ class _CodexStreamObserver:
         return "\n".join(self.messages.values()).strip()
 
 
-class CodexCliExecutor(CliExecutorBase):
+class CodexCliExecutor:
     name = "codex"
-    display_name = "Codex CLI"
-    command_environment = "CODEX_CLI_COMMAND"
-    default_command = "codex"
 
     def __init__(self, environ=None, command=None):
-        super().__init__(environ=environ, command=command)
+        self.environ = dict(os.environ if environ is None else environ)
+        self.command = command or self.environ.get("CODEX_CLI_COMMAND", "codex")
+        self._trace = []
 
     def _settings(self):
         return cli_model_settings(
@@ -71,6 +73,12 @@ class CodexCliExecutor(CliExecutorBase):
             executor="Codex CLI",
             allowed_protocols={"openai_responses"},
         )
+
+    def _executable(self):
+        executable = shutil.which(self.command, path=self.environ.get("PATH"))
+        if not executable:
+            raise RuntimeError(f"Codex CLI executable was not found: {self.command!r}.")
+        return executable
 
     @staticmethod
     def _provider_config(settings):
@@ -157,9 +165,32 @@ class CodexCliExecutor(CliExecutorBase):
         except OSError as exc:
             raise RuntimeError(f"Cannot start Codex CLI: {exc}") from exc
 
-        return self._complete_investigation(
-            completed, text, secrets, budget, started
+        if completed.timed_out:
+            status = "investigation_timeout"
+        elif isinstance(completed.monitor_error, ExecutionBudgetExceeded):
+            status = "investigation_fuse"
+        elif completed.monitor_error is not None:
+            raise RuntimeError(f"Cannot monitor Codex CLI output: {completed.monitor_error}")
+        elif completed.returncode != 0:
+            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            raise RuntimeError(
+                f"Codex CLI investigation exited with code {completed.returncode}: "
+                f"{detail or 'no stderr output'}"
+            )
+        else:
+            status = "ok"
+
+        self._trace.append(
+            {
+                "executor": self.name,
+                "phase": "investigation",
+                "status": status,
+                "return_code": completed.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                **budget.snapshot(),
+            }
         )
+        return text
 
     def finalize(self, prompt, workspace, schema, timeout_seconds, budget, attempt=0):
         started = time.monotonic()
@@ -170,6 +201,35 @@ class CodexCliExecutor(CliExecutorBase):
         except OSError as exc:
             raise RuntimeError(f"Cannot start Codex CLI: {exc}") from exc
 
-        return self._complete_finalization(
-            completed, text, secrets, budget, started, attempt
+        status = "ok" if completed.returncode == 0 else "error"
+        if completed.timed_out:
+            status = "timeout"
+        self._trace.append(
+            {
+                "executor": self.name,
+                "phase": "finalization",
+                "attempt": attempt + 1,
+                "status": status,
+                "return_code": completed.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                **budget.snapshot(),
+            }
         )
+        if completed.timed_out:
+            raise ReviewDeadlineExceeded(
+                "Codex CLI finalization reached the AI review deadline."
+            )
+        if completed.monitor_error is not None:
+            raise completed.monitor_error
+        if completed.returncode != 0:
+            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            raise RuntimeError(
+                f"Codex CLI finalization exited with code {completed.returncode}: "
+                f"{detail or 'no stderr output'}"
+            )
+        if not text:
+            raise ValueError("Codex CLI returned no structured output.")
+        return text
+
+    def get_trace(self):
+        return list(self._trace)

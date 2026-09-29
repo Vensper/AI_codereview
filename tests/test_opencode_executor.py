@@ -34,7 +34,7 @@ class OpenCodeCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.opencode_cli.run_process")
     @patch(
-        "utils.ai_executors.base.shutil.which",
+        "utils.ai_executors.opencode_cli.shutil.which",
         return_value=r"C:\bin\opencode.cmd",
     )
     def test_investigation_is_isolated_and_read_only(self, _which, run_process):
@@ -89,7 +89,7 @@ class OpenCodeCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.opencode_cli.run_process")
     @patch(
-        "utils.ai_executors.base.shutil.which",
+        "utils.ai_executors.opencode_cli.shutil.which",
         return_value=r"C:\bin\opencode.cmd",
     )
     def test_finalization_disables_all_tools_and_supports_responses(
@@ -160,7 +160,7 @@ class OpenCodeCliExecutorTests(unittest.TestCase):
 
     @patch("utils.ai_executors.opencode_cli.run_process")
     @patch(
-        "utils.ai_executors.base.shutil.which",
+        "utils.ai_executors.opencode_cli.shutil.which",
         return_value=r"C:\bin\opencode.cmd",
     )
     def test_nonzero_exit_redacts_credential(self, _which, run_process):

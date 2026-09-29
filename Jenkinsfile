@@ -431,31 +431,7 @@ pipeline {
                         def credentialId = ''
                         def opencodeCacheHome = env.OPENCODE_CACHE_HOME?.trim() ?: "${env.WORKSPACE}\\.opencode-provider-cache"
 
-                        def executorProfiles = [
-                            claude: [
-                                deepseekBaseUrl: 'https://api.deepseek.com/anthropic',
-                                deepseekProtocol: 'anthropic',
-                                customDefaultProtocol: 'anthropic',
-                                protocols: ['anthropic'],
-                                authStyles: ['bearer', 'api_key']
-                            ],
-                            codex: [
-                                deepseekBaseUrl: 'https://api.deepseek.com',
-                                deepseekProtocol: 'openai_responses',
-                                customDefaultProtocol: 'openai_responses',
-                                protocols: ['openai_responses'],
-                                authStyles: ['bearer', 'api_key']
-                            ],
-                            opencode: [
-                                deepseekBaseUrl: 'https://api.deepseek.com',
-                                deepseekProtocol: 'openai_chat',
-                                customDefaultProtocol: 'openai_chat',
-                                protocols: ['openai_chat', 'openai_responses'],
-                                authStyles: ['bearer']
-                            ]
-                        ]
-                        def profile = executorProfiles[executor]
-                        if (profile == null) {
+                        if (!(executor in ['claude', 'codex', 'opencode'])) {
                             error("不支持的 AI_EXECUTOR：${executor ?: '(empty)'}。")
                         }
 
@@ -463,8 +439,16 @@ pipeline {
                             model = model ?: 'deepseek-flash[1m]'
                             authStyle = 'bearer'
                             credentialId = 'deepseek-api-key'
-                            baseUrl = profile.deepseekBaseUrl
-                            protocol = profile.deepseekProtocol
+                            if (executor == 'claude') {
+                                baseUrl = 'https://api.deepseek.com/anthropic'
+                                protocol = 'anthropic'
+                            } else if (executor == 'codex') {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_responses'
+                            } else {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_chat'
+                            }
                         } else if (provider == 'custom') {
                             baseUrl = params.AI_BASE_URL?.trim()
                             credentialId = params.AI_CREDENTIAL_ID?.trim()
@@ -481,16 +465,27 @@ pipeline {
                                 error('custom 的 AI_CREDENTIAL_ID 必须以 ai-model- 开头，且只能包含字母、数字、点、下划线和连字符。')
                             }
                             if (protocol == 'auto') {
-                                protocol = profile.customDefaultProtocol
+                                if (executor == 'claude') {
+                                    protocol = 'anthropic'
+                                } else if (executor == 'codex') {
+                                    protocol = 'openai_responses'
+                                } else {
+                                    protocol = 'openai_chat'
+                                }
                             }
                         } else {
                             error("不支持的 AI_PROVIDER：${provider ?: '(empty)'}。")
                         }
 
-                        if (!(protocol in profile.protocols)) {
-                            error("AI_EXECUTOR=${executor} 不支持 AI_API_PROTOCOL=${protocol}；允许值：${profile.protocols.join(', ')}。")
+                        def supportedProtocols = [
+                            claude: ['anthropic'],
+                            codex: ['openai_responses'],
+                            opencode: ['openai_chat', 'openai_responses']
+                        ]
+                        if (!(protocol in supportedProtocols[executor])) {
+                            error("AI_EXECUTOR=${executor} 不支持 AI_API_PROTOCOL=${protocol}；允许值：${supportedProtocols[executor].join(', ')}。")
                         }
-                        if (!(authStyle in profile.authStyles)) {
+                        if (executor == 'opencode' && authStyle != 'bearer') {
                             error('OpenCode 的 OpenAI 兼容提供方当前只支持 AI_AUTH_STYLE=bearer。')
                         }
 
