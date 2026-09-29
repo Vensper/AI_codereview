@@ -20,6 +20,7 @@ class _OpenCodeStreamObserver:
         self.seen_steps = set()
         self.seen_tool_calls = set()
         self.text_parts = {}
+        self.errors = []
 
     def __call__(self, line):
         try:
@@ -30,6 +31,11 @@ class _OpenCodeStreamObserver:
             return
 
         event_type = str(event.get("type") or "")
+        if event_type == "error":
+            message = self._error_message(event.get("error"))
+            if message and message not in self.errors:
+                self.errors.append(message)
+
         part = event.get("part")
         if not isinstance(part, dict):
             part = {}
@@ -59,6 +65,29 @@ class _OpenCodeStreamObserver:
 
     def text(self):
         return "\n".join(self.text_parts.values()).strip()
+
+    def error_text(self):
+        return "\n".join(self.errors).strip()
+
+    @staticmethod
+    def _error_message(error):
+        if isinstance(error, str):
+            return error.strip()
+        if not isinstance(error, dict):
+            return ""
+
+        name = error.get("name")
+        data = error.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, str) or not message.strip():
+            message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            if isinstance(name, str) and name.strip():
+                return f"{name.strip()}: {message.strip()}"
+            return message.strip()
+        if isinstance(name, str):
+            return name.strip()
+        return ""
 
 
 class OpenCodeCliExecutor:
@@ -215,12 +244,17 @@ class OpenCodeCliExecutor:
                 timeout_seconds=timeout_seconds,
                 stdout_line_callback=observer,
             )
-        return completed, observer.text(), secrets
+        return completed, observer.text(), observer.error_text(), secrets
+
+    @staticmethod
+    def _failure_detail(completed, observed_error, secrets):
+        raw_detail = observed_error or completed.stderr.strip()
+        return redact(raw_detail, secrets)[-2000:]
 
     def investigate(self, prompt, workspace, timeout_seconds, budget):
         started = time.monotonic()
         try:
-            completed, text, secrets = self._run(
+            completed, text, observed_error, secrets = self._run(
                 prompt, workspace, timeout_seconds, budget, tools_enabled=True
             )
         except OSError as exc:
@@ -235,10 +269,10 @@ class OpenCodeCliExecutor:
                 f"Cannot monitor OpenCode CLI output: {completed.monitor_error}"
             )
         elif completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            detail = self._failure_detail(completed, observed_error, secrets)
             raise RuntimeError(
                 f"OpenCode CLI investigation exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
+                f"{detail or 'no error output'}"
             )
         else:
             status = "ok"
@@ -259,7 +293,7 @@ class OpenCodeCliExecutor:
         del schema  # OpenCode 1.18.31 has no native output-schema CLI option.
         started = time.monotonic()
         try:
-            completed, text, secrets = self._run(
+            completed, text, observed_error, secrets = self._run(
                 prompt, workspace, timeout_seconds, budget, tools_enabled=False
             )
         except OSError as exc:
@@ -286,10 +320,10 @@ class OpenCodeCliExecutor:
         if completed.monitor_error is not None:
             raise completed.monitor_error
         if completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            detail = self._failure_detail(completed, observed_error, secrets)
             raise RuntimeError(
                 f"OpenCode CLI finalization exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
+                f"{detail or 'no error output'}"
             )
         if not text:
             raise ValueError("OpenCode CLI returned no structured output.")

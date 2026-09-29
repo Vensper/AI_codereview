@@ -173,6 +173,38 @@ class OpenCodeCliExecutorTests(unittest.TestCase):
                 "prompt", r"C:\worktree", SCHEMA, 120, ExecutionBudget()
             )
 
+    @patch("utils.ai_executors.opencode_cli.run_process")
+    @patch(
+        "utils.ai_executors.opencode_cli.shutil.which",
+        return_value=r"C:\bin\opencode.cmd",
+    )
+    def test_nonzero_exit_reports_structured_stdout_error(
+        self, _which, run_process
+    ):
+        def completed(*_args, **kwargs):
+            kwargs["stdout_line_callback"](json.dumps({
+                "type": "error",
+                "error": {
+                    "name": "ProviderAuthError",
+                    "data": {
+                        "message": "request rejected for top-secret",
+                        "request": {"prompt": "must not be logged"},
+                    },
+                },
+            }))
+            return ProcessResult(1, "", "")
+
+        run_process.side_effect = completed
+        executor = OpenCodeCliExecutor(environ=self.environment())
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"ProviderAuthError: request rejected for \*\*\*",
+        ) as raised:
+            executor.investigate(
+                "prompt", r"C:\worktree", 120, ExecutionBudget()
+            )
+        self.assertNotIn("must not be logged", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

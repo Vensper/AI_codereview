@@ -97,6 +97,23 @@ pipeline {
     stages {
         stage('checkout') {
             steps {
+                bat '''
+                    @echo off
+                    echo AI CLI diagnostics:
+                    where codex
+                    if errorlevel 1 (
+                        echo codex executable: not found
+                    ) else (
+                        codex --version
+                    )
+                    where opencode
+                    if errorlevel 1 (
+                        echo opencode executable: not found
+                    ) else (
+                        opencode --version
+                    )
+                    exit /b 0
+                '''
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     script {
                         env.REVIEW_SKIP = 'false'

@@ -27,6 +27,18 @@ class JenkinsAiParameterTests(unittest.TestCase):
         self.assertIn('"AI_API_PROTOCOL=${protocol}"', self.text)
         self.assertNotIn("'AI_EXECUTOR=claude'", self.text)
 
+    def test_cli_paths_and_versions_are_logged_before_credentials(self):
+        checkout = self.text.index("stage('checkout')")
+        diagnostics = self.text.index("echo AI CLI diagnostics:")
+        checkout_logic = self.text.index("catchError", checkout)
+        self.assertLess(diagnostics, checkout_logic)
+        block = self.text[diagnostics:checkout_logic]
+        self.assertIn("where codex", block)
+        self.assertIn("codex --version", block)
+        self.assertIn("where opencode", block)
+        self.assertIn("opencode --version", block)
+        self.assertIn("exit /b 0", block)
+
 
 if __name__ == "__main__":
     unittest.main()

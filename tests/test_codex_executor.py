@@ -68,7 +68,10 @@ class CodexCliExecutorTests(unittest.TestCase):
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
         self.assertIn("--strict-config", command)
-        self.assertNotIn("top-secret", " ".join(command))
+        joined_command = " ".join(command)
+        self.assertNotIn("top-secret", joined_command)
+        self.assertNotIn("model_supports_reasoning_summaries", joined_command)
+        self.assertIn('model_reasoning_summary="none"', command)
         kwargs = run_process.call_args.kwargs
         self.assertEqual(kwargs["env"]["AI_API_KEY"], "top-secret")
         self.assertNotIn("DEEPSEEK_API_KEY", kwargs["env"])

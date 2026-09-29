@@ -93,7 +93,6 @@ class CodexCliExecutor:
             "check_for_update_on_startup=false",
             "analytics.enabled=false",
             "agents.enabled=false",
-            "model_supports_reasoning_summaries=false",
             'model_reasoning_summary="none"',
         ]
         if settings.auth_style == "bearer":
