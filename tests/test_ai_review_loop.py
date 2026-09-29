@@ -6,10 +6,11 @@ from utils.ai_review import (
     chat_messages_to_responses,
     load_review_schema,
     parse_review_with_retry,
+    run_cli_review,
     run_review_loop,
     validate_review_text,
 )
-from utils.ai_executors.base import ExecutionBudget
+from utils.ai_executors.base import ExecutionBudget, ReviewDeadline
 
 
 def tool_message(count=1):
@@ -50,6 +51,94 @@ def structured_response(value):
 
 
 class ReviewLoopTests(unittest.TestCase):
+    def test_cli_investigation_failure_still_writes_trace_and_closes_executor(self):
+        class FailingExecutor:
+            def __init__(self):
+                self.closed = False
+
+            def investigate(self, *_args, **_kwargs):
+                raise RuntimeError("investigation failed")
+
+            def get_trace(self):
+                return [{"phase": "investigation", "status": "error"}]
+
+            def close(self):
+                self.closed = True
+
+        executor = FailingExecutor()
+        with patch("utils.ai_review.write_json") as write_json:
+            with self.assertRaisesRegex(RuntimeError, "investigation failed"):
+                run_cli_review(
+                    executor,
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+
+        write_json.assert_called_once_with(
+            "ai-tool-trace.json",
+            [{"phase": "investigation", "status": "error"}],
+        )
+        self.assertTrue(executor.closed)
+
+    def test_cli_close_failure_does_not_hide_original_review_error(self):
+        class FailingExecutor:
+            def investigate(self, *_args, **_kwargs):
+                raise RuntimeError("original review error")
+
+            def get_trace(self):
+                return []
+
+            def close(self):
+                raise RuntimeError("close error")
+
+        with patch(
+            "utils.ai_review.write_json", side_effect=RuntimeError("trace write error")
+        ), patch("utils.ai_review.print"):
+            with self.assertRaisesRegex(RuntimeError, "original review error"):
+                run_cli_review(
+                    FailingExecutor(),
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+
+    def test_cli_trace_failure_is_fatal_after_an_otherwise_successful_review(self):
+        class SuccessfulExecutor:
+            def __init__(self):
+                self.closed = False
+
+            def investigate(self, *_args, **_kwargs):
+                return "draft"
+
+            def finalize(self, *_args, **_kwargs):
+                return json.dumps(review_value())
+
+            def get_trace(self):
+                return [{"phase": "finalization", "status": "ok"}]
+
+            def close(self):
+                self.closed = True
+
+        executor = SuccessfulExecutor()
+        with patch("utils.ai_review.write_text"), patch(
+            "utils.ai_review.write_json", side_effect=RuntimeError("trace write error")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "trace write error"):
+                run_cli_review(
+                    executor,
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+        self.assertTrue(executor.closed)
+
     def test_tool_transcript_is_translated_for_responses_api(self):
         messages = [
             {"role": "system", "content": "system"},

@@ -375,6 +375,66 @@ def parse_review_with_retry(
     )
 
 
+def run_cli_review(executor, premerge_root, user_prompt, schema, deadline, budget):
+    """Run one CLI review and always persist diagnostics and release resources."""
+    try:
+        investigation = executor.investigate(
+            build_investigation_prompt(SYSTEM_PROMPT, user_prompt),
+            premerge_root,
+            timeout_seconds=deadline.require_investigation_time(),
+            budget=budget,
+        )
+        deadline.begin_finalization()
+
+        def generate(attempt, previous_output, validation_error):
+            prompt = build_cli_prompt(
+                SYSTEM_PROMPT,
+                user_prompt,
+                investigation=investigation,
+                previous_output=previous_output,
+                error=validation_error,
+            )
+            return executor.finalize(
+                prompt,
+                premerge_root,
+                schema,
+                timeout_seconds=deadline.require_finalization_time(),
+                budget=budget,
+                attempt=attempt,
+            )
+
+        return generate_review_with_retry(
+            generate,
+            schema,
+            write_text_fn=write_text,
+            check_deadline=deadline.require_finalization_time,
+        )
+    finally:
+        active_error = sys.exc_info()[1]
+        trace_error = None
+        try:
+            write_json("ai-tool-trace.json", executor.get_trace())
+        except Exception as exc:
+            trace_error = exc
+        finally:
+            close = getattr(executor, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    print(
+                        f"WARNING: failed to close AI executor cleanly: {exc}",
+                        file=sys.stderr,
+                    )
+        if trace_error is not None:
+            if active_error is None:
+                raise trace_error
+            print(
+                f"WARNING: failed to persist AI executor trace: {trace_error}",
+                file=sys.stderr,
+            )
+
+
 def main():
     premerge_root_arg = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PREMERGE_ROOT
     premerge_root, premerge_meta = load_premerge_context(premerge_root_arg)
@@ -404,46 +464,14 @@ def main():
     if executor_name != "deepseek":
         schema = load_review_schema()
         executor = create_cli_executor(executor_name)
-
-        try:
-            investigation = executor.investigate(
-                build_investigation_prompt(SYSTEM_PROMPT, user_prompt),
-                premerge_root,
-                timeout_seconds=deadline.require_investigation_time(),
-                budget=budget,
-            )
-        finally:
-            investigation_trace = executor.get_trace()
-
-        deadline.begin_finalization()
-
-        def generate(attempt, previous_output, validation_error):
-            prompt = build_cli_prompt(
-                SYSTEM_PROMPT,
-                user_prompt,
-                investigation=investigation,
-                previous_output=previous_output,
-                error=validation_error,
-            )
-            return executor.finalize(
-                prompt,
-                premerge_root,
-                schema,
-                timeout_seconds=deadline.require_finalization_time(),
-                budget=budget,
-                attempt=attempt,
-            )
-
-        try:
-            review = generate_review_with_retry(
-                generate,
-                schema,
-                write_text_fn=write_text,
-                check_deadline=deadline.require_finalization_time,
-            )
-        finally:
-            trace = executor.get_trace() or investigation_trace
-            write_json("ai-tool-trace.json", trace)
+        review = run_cli_review(
+            executor,
+            premerge_root,
+            user_prompt,
+            schema,
+            deadline,
+            budget,
+        )
     else:
         agent_tools.set_root(premerge_root)
         agent_tools.reset_trace()

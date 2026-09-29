@@ -588,14 +588,14 @@ pipeline {
                                             '''
                                         }
                                     } else {
-                                        // 失败回写脚本尚不可用时，直接调用 GitLab API。
-                                        def reportableStages = [
-                                            '识别 MR', '检出审查工具', '检出 MR 源分支', '获取源提交 SHA',
-                                            '发送开始通知', '准备预合并工作区', '获取 GitLab MR diff',
-                                            '生成本地 Git 兜底 diff', 'AI 审查', '发布审查结果', '归档审查产物'
-                                        ]
-                                        def stageName = reportableStages.contains(env.REVIEW_FAILURE_STAGE) ?
-                                            env.REVIEW_FAILURE_STAGE : '未知阶段'
+                                        // 启动兜底：review-tool 尚未成功检出时 Python reporter 不可用。
+                                        // REVIEW_FAILURE_STAGE 只由本 Jenkinsfile 设置；这里只做长度和换行校验，
+                                        // 避免再维护一份容易漂移的阶段白名单。
+                                        def stageName = env.REVIEW_FAILURE_STAGE?.trim()
+                                        if (!stageName || stageName.length() > 40 ||
+                                            stageName.contains('\r') || stageName.contains('\n')) {
+                                            stageName = '未知阶段'
+                                        }
                                         def buildLink = env.BUILD_URL?.trim() ?: '请查看 Jenkins 构建记录'
                                         env.REVIEW_FAILURE_NOTE = "AI代码审核失败。\n\n" +
                                             "- 失败阶段：${stageName}\n" +

@@ -9,27 +9,29 @@ from utils.common import (
 )
 
 
+MAX_FAILURE_STAGE_LENGTH = 40
+
+
+def normalize_failure_stage(value):
+    """Keep a short, single-line Jenkins-controlled stage name."""
+    stage = str(value or "").strip()
+    if (
+        not stage
+        or len(stage) > MAX_FAILURE_STAGE_LENGTH
+        or "\r" in stage
+        or "\n" in stage
+    ):
+        return "未知阶段"
+    return stage
+
+
 def main():
     if not publishing_enabled():
         print("Publishing disabled; failure notification skipped.")
         return
 
     base_url, token, project_id, mr_iid = publishing_context()
-    stage = os.environ.get("REVIEW_FAILURE_STAGE", "").strip()
-    if stage not in {
-        "识别 MR",
-        "检出审查工具",
-        "检出 MR 源分支",
-        "获取源提交 SHA",
-        "发送开始通知",
-        "准备预合并工作区",
-        "获取 GitLab MR diff",
-        "生成本地 Git 兜底 diff",
-        "AI 审查",
-        "发布审查结果",
-        "归档审查产物",
-    }:
-        stage = "未知阶段"
+    stage = normalize_failure_stage(os.environ.get("REVIEW_FAILURE_STAGE"))
     build_url = os.environ.get("BUILD_URL", "").strip()
     parsed_url = urllib.parse.urlparse(build_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
