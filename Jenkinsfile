@@ -3,88 +3,34 @@ pipeline {
 
     parameters {
         string(
-            name: 'MANUAL_REPOSITORY_URL',
+            name: 'ai_excutor',
+            defaultValue: 'cc',
+            description: 'AI 执行器：cc=Claude Code，cx=Codex，oc=OpenCode。'
+        )
+        string(
+            name: 'PROJECT_ID',
+            defaultValue: '',
+            description: 'GitLab 目标项目 ID；Webhook 触发时自动从事件中读取。'
+        )
+        string(
+            name: 'dev_repository',
             defaultValue: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
-            description: '仅手动构建备用；Webhook 构建优先使用 GitLab 事件中的仓库地址。'
+            description: 'MR 来源仓库地址；Webhook 触发时自动从事件中读取。'
         )
         string(
-            name: 'MANUAL_SOURCE_BRANCH',
+            name: 'SOURCE_BRANCH',
             defaultValue: '',
-            description: '仅手动构建备用；填写 MR 来源分支。'
+            description: 'MR 来源分支；Webhook 触发时自动从事件中读取。'
         )
         string(
-            name: 'MANUAL_TARGET_BRANCH',
+            name: 'MR_IID',
+            defaultValue: '',
+            description: 'GitLab MR IID，例如 34；Webhook 触发时自动从事件中读取。'
+        )
+        string(
+            name: 'TARGET_BRANCH',
             defaultValue: 'master',
-            description: '仅手动构建备用；填写 MR 目标分支。'
-        )
-        string(
-            name: 'MANUAL_MR_IID',
-            defaultValue: '',
-            description: '仅手动构建备用；填写 GitLab MR IID，例如 6。'
-        )
-        string(
-            name: 'MANUAL_PROJECT_ID',
-            defaultValue: '',
-            description: '仅手动构建备用；填写 GitLab 项目 ID。'
-        )
-        string(name: 'WEBHOOK_EVENT_KIND', defaultValue: '', description: 'Webhook 接收入口填写；手动构建留空。')
-        string(name: 'WEBHOOK_MR_IID', defaultValue: '', description: '原始 GitLab 事件中的 MR IID。')
-        string(name: 'WEBHOOK_TARGET_PROJECT_ID', defaultValue: '', description: '原始事件中的目标项目 ID。')
-        string(name: 'WEBHOOK_SOURCE_PROJECT_ID', defaultValue: '', description: '原始事件中的来源项目 ID。')
-        string(name: 'WEBHOOK_SOURCE_BRANCH', defaultValue: '', description: '原始事件中的来源分支。')
-        string(name: 'WEBHOOK_TARGET_BRANCH', defaultValue: '', description: '原始事件中的目标分支。')
-        string(name: 'WEBHOOK_SOURCE_REPO_HTTP_URL', defaultValue: '', description: '原始事件中的来源仓库 HTTP URL。')
-        string(name: 'WEBHOOK_TARGET_REPO_HTTP_URL', defaultValue: '', description: '原始事件中的目标仓库 HTTP URL。')
-        string(name: 'WEBHOOK_SOURCE_SHA', defaultValue: '', description: '原始事件中的来源提交 SHA。')
-        booleanParam(
-            name: 'PUBLISH_COMMENT',
-            defaultValue: true,
-            description: '是否向对应 GitLab MR 发布开始通知、审查评论和状态标签。'
-        )
-        booleanParam(
-            name: 'FORCE_REVIEW',
-            defaultValue: false,
-            description: '仅手动排障使用：即使当前 MR 提交已成功审查，仍强制重新审查。'
-        )
-        booleanParam(
-            name: 'FORCE_LOCAL_GIT_DIFF',
-            defaultValue: false,
-            description: '仅测试用：跳过 GitLab API diff，验证本地 Git diff 兜底路径。正式 Webhook 构建保持 false。'
-        )
-        choice(
-            name: 'AI_EXECUTOR',
-            choices: ['claude', 'codex', 'opencode'],
-            description: 'AI CLI 执行器。默认 Claude Code；也可选择 Codex CLI 或 OpenCode CLI。'
-        )
-        choice(
-            name: 'AI_PROVIDER',
-            choices: ['deepseek', 'custom'],
-            description: '模型服务。deepseek 根据执行器自动选择国内官方兼容接口；custom 用于其他兼容接口或国内统一网关。'
-        )
-        choice(
-            name: 'AI_API_PROTOCOL',
-            choices: ['auto', 'anthropic', 'openai_responses', 'openai_chat'],
-            description: '接口协议。deepseek 使用 auto；custom 的 auto 会采用所选执行器的默认协议，也可显式指定。'
-        )
-        string(
-            name: 'AI_BASE_URL',
-            defaultValue: '',
-            description: 'AI_PROVIDER=custom 时必填，填写与所选协议兼容的 HTTPS 根地址；deepseek 时忽略。'
-        )
-        string(
-            name: 'AI_MODEL',
-            defaultValue: '',
-            description: '模型名称。deepseek 留空时使用 deepseek-flash[1m]；custom 必填。'
-        )
-        choice(
-            name: 'AI_AUTH_STYLE',
-            choices: ['bearer', 'api_key'],
-            description: 'custom 接口鉴权方式：bearer 对应 Authorization: Bearer，api_key 对应 x-api-key；deepseek 时固定 bearer。'
-        )
-        string(
-            name: 'AI_CREDENTIAL_ID',
-            defaultValue: 'ai-model-custom-api-key',
-            description: '仅 custom 使用：以 ai-model- 开头的 Jenkins Secret text 凭据 ID。只填写凭据 ID，不要填写 API Key。'
+            description: 'MR 目标分支；Webhook 触发时自动从事件中读取。'
         )
     }
 
@@ -128,81 +74,59 @@ pipeline {
                                 cause?.data?.actionType?.toString()?.toUpperCase() == 'NOTE'
                             }
                         } catch (Exception ignored) {
-                            echo '无法读取 GitLab 构建原因；继续使用插件变量和 Webhook 参数识别触发方式。'
+                            echo '无法读取 GitLab 构建原因；继续使用 GitLab 插件环境变量识别触发方式。'
                         }
                         def keywordPhrase = env.gitlabTriggerPhrase?.trim() == '/codereview'
-                        def commentReview = pluginAction == 'NOTE' || noteCause || keywordPhrase ||
-                            params.WEBHOOK_EVENT_KIND?.trim() == 'note'
+                        def commentReview = pluginAction == 'NOTE' || noteCause || keywordPhrase
                         def pluginEvent = ['MERGE', 'NOTE'].contains(pluginAction) || noteCause ||
                             env.gitlabMergeRequestIid?.trim() ||
                             (!pluginAction && env.gitlabSourceBranch?.trim() &&
                              env.gitlabTargetBranch?.trim() &&
                              env.gitlabSourceBranch.trim() != env.gitlabTargetBranch.trim())
-                        def rawEvent = params.WEBHOOK_EVENT_KIND?.trim() in ['merge_request', 'note']
-                        env.REVIEW_GITLAB_TRIGGER = (pluginEvent || rawEvent) ? 'true' : 'false'
-                        env.REVIEW_BYPASS_DEDUP = (params.FORCE_REVIEW || commentReview) ? 'true' : 'false'
-
-                        if (env.gitlabMergeRequestIid?.trim() && params.WEBHOOK_MR_IID?.trim() &&
-                            env.gitlabMergeRequestIid.trim() != params.WEBHOOK_MR_IID.trim()) {
-                            env.REVIEW_IDENTITY_CONFLICT = 'true'
-                            error('插件变量与原始 Webhook 的 MR IID 冲突，停止回写以避免写错 MR。')
-                        }
-                        if (env.gitlabMergeRequestTargetProjectId?.trim() &&
-                            params.WEBHOOK_TARGET_PROJECT_ID?.trim() &&
-                            env.gitlabMergeRequestTargetProjectId.trim() != params.WEBHOOK_TARGET_PROJECT_ID.trim()) {
-                            env.REVIEW_IDENTITY_CONFLICT = 'true'
-                            error('插件变量与原始 Webhook 的目标项目 ID 冲突，停止回写以避免写错 MR。')
-                        }
+                        env.REVIEW_GITLAB_TRIGGER = pluginEvent ? 'true' : 'false'
+                        env.REVIEW_BYPASS_DEDUP = (commentReview || !pluginEvent) ? 'true' : 'false'
 
                         env.EFFECTIVE_REPOSITORY_URL =
                             env.gitlabSourceRepoHttpUrl?.trim() ?:
-                            params.WEBHOOK_SOURCE_REPO_HTTP_URL?.trim() ?:
-                            (env.REVIEW_GITLAB_TRIGGER == 'true' ? '' : params.MANUAL_REPOSITORY_URL.trim())
+                            params.dev_repository?.trim()
 
                         env.EFFECTIVE_TARGET_REPOSITORY_URL =
-                            env.gitlabTargetRepoHttpUrl?.trim() ?:
-                            params.WEBHOOK_TARGET_REPO_HTTP_URL?.trim() ?: ''
+                            env.gitlabTargetRepoHttpUrl?.trim() ?: ''
 
                         env.EFFECTIVE_SOURCE_BRANCH =
                             env.gitlabSourceBranch?.trim() ?:
-                            params.WEBHOOK_SOURCE_BRANCH?.trim() ?:
-                            (env.REVIEW_GITLAB_TRIGGER == 'true' ? '' : params.MANUAL_SOURCE_BRANCH.trim())
+                            params.SOURCE_BRANCH?.trim()
 
                         env.EFFECTIVE_TARGET_BRANCH =
                             env.gitlabTargetBranch?.trim() ?:
-                            params.WEBHOOK_TARGET_BRANCH?.trim() ?:
-                            (env.REVIEW_GITLAB_TRIGGER == 'true' ? '' : params.MANUAL_TARGET_BRANCH.trim())
+                            params.TARGET_BRANCH?.trim()
 
                         env.EFFECTIVE_MR_IID =
                             env.gitlabMergeRequestIid?.trim() ?:
-                            params.WEBHOOK_MR_IID?.trim() ?:
-                            (env.REVIEW_GITLAB_TRIGGER == 'true' ? '' : params.MANUAL_MR_IID.trim())
+                            params.MR_IID?.trim()
 
                         env.EFFECTIVE_PROJECT_ID =
                             env.gitlabMergeRequestTargetProjectId?.trim() ?:
-                            params.WEBHOOK_TARGET_PROJECT_ID?.trim() ?:
-                            (env.REVIEW_GITLAB_TRIGGER == 'true' ? '' : params.MANUAL_PROJECT_ID.trim())
+                            params.PROJECT_ID?.trim()
 
-                        env.EFFECTIVE_SOURCE_PROJECT_ID = params.WEBHOOK_SOURCE_PROJECT_ID?.trim() ?: ''
-                        env.EVENT_SOURCE_SHA =
-                            env.gitlabMergeRequestLastCommit?.trim() ?:
-                            params.WEBHOOK_SOURCE_SHA?.trim() ?: ''
+                        env.EFFECTIVE_SOURCE_PROJECT_ID =
+                            env.gitlabMergeRequestSourceProjectId?.trim() ?: ''
+                        env.EVENT_SOURCE_SHA = env.gitlabMergeRequestLastCommit?.trim() ?: ''
                         env.REVIEW_PUBLISH_COMMENT =
-                            (params.PUBLISH_COMMENT &&
-                             (env.REVIEW_GITLAB_TRIGGER == 'true' ||
-                              (env.EFFECTIVE_PROJECT_ID && env.EFFECTIVE_MR_IID))) ? 'true' : 'false'
+                            (env.REVIEW_GITLAB_TRIGGER == 'true' ||
+                             (env.EFFECTIVE_PROJECT_ID && env.EFFECTIVE_MR_IID)) ? 'true' : 'false'
                         if (env.REVIEW_GITLAB_TRIGGER != 'true' && env.REVIEW_PUBLISH_COMMENT != 'true') {
                             env.FORCE_LOCAL_GIT_DIFF = 'true'
                         }
 
                         if (!env.EFFECTIVE_REPOSITORY_URL) {
-                            error('未获取仓库地址。请通过 GitLab MR Webhook 触发，或填写 MANUAL_REPOSITORY_URL。')
+                            error('未获取仓库地址。请通过 GitLab MR Webhook 触发，或填写 dev_repository。')
                         }
                         if (!env.EFFECTIVE_SOURCE_BRANCH) {
-                            error('未获取来源分支。请通过 GitLab MR Webhook 触发，或填写 MANUAL_SOURCE_BRANCH。')
+                            error('未获取来源分支。请通过 GitLab MR Webhook 触发，或填写 SOURCE_BRANCH。')
                         }
                         if (!env.EFFECTIVE_TARGET_BRANCH) {
-                            error('未获取目标分支。请通过 GitLab MR Webhook 触发，或填写 MANUAL_TARGET_BRANCH。')
+                            error('未获取目标分支。请通过 GitLab MR Webhook 触发，或填写 TARGET_BRANCH。')
                         }
                         echo """
                             === Merge Request Context ===
@@ -223,7 +147,7 @@ pipeline {
                     dir('review-tool') {
                         checkout([
                             $class: 'GitSCM',
-                            branches: [[name: 'refs/heads/codex/multi-excutor']],
+                            branches: [[name: 'refs/heads/codex/codex-cli']],
                             userRemoteConfigs: [[
                                 url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
                                 credentialsId: 'gitlab-project-read'
@@ -439,77 +363,33 @@ pipeline {
                     script {
                         env.REVIEW_FAILURE_STAGE = '配置 AI 执行器'
 
-                        def executor = params.AI_EXECUTOR?.trim()?.toLowerCase()
-                        def provider = params.AI_PROVIDER?.trim()?.toLowerCase()
-                        def baseUrl = ''
-                        def model = params.AI_MODEL?.trim()
-                        def protocol = params.AI_API_PROTOCOL?.trim()?.toLowerCase()
-                        def authStyle = params.AI_AUTH_STYLE?.trim()?.toLowerCase()
-                        def credentialId = ''
+                        def executorCode = params.ai_excutor?.trim()?.toLowerCase() ?: 'cc'
+                        def executorNames = [cc: 'claude', cx: 'codex', oc: 'opencode']
+                        def executor = executorNames[executorCode]
                         def opencodeCacheHome = env.OPENCODE_CACHE_HOME?.trim() ?: "${env.WORKSPACE}\\.opencode-provider-cache"
 
-                        if (!(executor in ['claude', 'codex', 'opencode'])) {
-                            error("不支持的 AI_EXECUTOR：${executor ?: '(empty)'}。")
+                        if (!executor) {
+                            error("不支持的 ai_excutor：${executorCode}；只允许 cc、cx、oc。")
                         }
 
-                        if (provider == 'deepseek') {
-                            model = model ?: 'deepseek-flash[1m]'
-                            authStyle = 'bearer'
-                            credentialId = 'deepseek-api-key'
-                            if (executor == 'claude') {
-                                baseUrl = 'https://api.deepseek.com/anthropic'
-                                protocol = 'anthropic'
-                            } else if (executor == 'codex') {
-                                baseUrl = 'https://api.deepseek.com'
-                                protocol = 'openai_responses'
-                            } else {
-                                baseUrl = 'https://api.deepseek.com'
-                                protocol = 'openai_chat'
+                        dir('review-tool') {
+                            withEnv(["AI_EXECUTOR=${executor}"]) {
+                                bat '''
+                                    @echo off
+                                    python -u -m utils.resolve_ai_gateway "../ai-gateway-route.txt"
+                                '''
                             }
-                        } else if (provider == 'custom') {
-                            baseUrl = params.AI_BASE_URL?.trim()
-                            credentialId = params.AI_CREDENTIAL_ID?.trim()
-                            if (!baseUrl) {
-                                error('AI_PROVIDER=custom 时必须填写 AI_BASE_URL。')
-                            }
-                            if (!model) {
-                                error('AI_PROVIDER=custom 时必须填写 AI_MODEL。')
-                            }
-                            if (!(authStyle in ['bearer', 'api_key'])) {
-                                error('AI_AUTH_STYLE 只能是 bearer 或 api_key。')
-                            }
-                            if (!(credentialId ==~ /^ai-model-[A-Za-z0-9._-]+$/)) {
-                                error('custom 的 AI_CREDENTIAL_ID 必须以 ai-model- 开头，且只能包含字母、数字、点、下划线和连字符。')
-                            }
-                            if (protocol == 'auto') {
-                                if (executor == 'claude') {
-                                    protocol = 'anthropic'
-                                } else if (executor == 'codex') {
-                                    protocol = 'openai_responses'
-                                } else {
-                                    protocol = 'openai_chat'
-                                }
-                            }
-                        } else {
-                            error("不支持的 AI_PROVIDER：${provider ?: '(empty)'}。")
                         }
-
-                        def supportedProtocols = [
-                            claude: ['anthropic'],
-                            codex: ['openai_responses'],
-                            opencode: ['openai_chat', 'openai_responses']
-                        ]
-                        if (!(protocol in supportedProtocols[executor])) {
-                            error("AI_EXECUTOR=${executor} 不支持 AI_API_PROTOCOL=${protocol}；允许值：${supportedProtocols[executor].join(', ')}。")
+                        def gatewayRoute = readFile('ai-gateway-route.txt').readLines()
+                        if (gatewayRoute.size() != 5 || gatewayRoute.any { !it?.trim() }) {
+                            error('统一模型网关路由解析结果无效。')
                         }
-                        if (executor == 'opencode' && authStyle != 'bearer') {
-                            error('OpenCode 的 OpenAI 兼容提供方当前只支持 AI_AUTH_STYLE=bearer。')
-                        }
-
-                        if (!(baseUrl ==~ /^https:\/\/[^\s?#]+\/?$/)) {
-                            error('AI_BASE_URL 必须是无查询参数、无片段的 HTTPS 地址。')
-                        }
-                        echo "AI executor=${executor}; provider=${provider}; protocol=${protocol}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
+                        def protocol = gatewayRoute[0].trim()
+                        def baseUrl = gatewayRoute[1].trim()
+                        def model = gatewayRoute[2].trim()
+                        def authStyle = gatewayRoute[3].trim()
+                        def credentialId = gatewayRoute[4].trim()
+                        echo "AI executor=${executor}; provider=gateway; protocol=${protocol}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
                         env.REVIEW_FAILURE_STAGE = 'AI 审查'
                         dir('review-tool') {
                             withCredentials([

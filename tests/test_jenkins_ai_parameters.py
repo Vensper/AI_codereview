@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 
@@ -10,22 +11,47 @@ class JenkinsAiParameterTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = JENKINSFILE.read_text(encoding="utf-8")
 
-    def test_claude_is_first_executor_choice(self):
-        self.assertIn(
-            "name: 'AI_EXECUTOR',\n            choices: ['claude', 'codex', 'opencode']",
-            self.text,
+    def test_manual_build_exposes_only_six_parameters(self):
+        block = self.text.split("    parameters {", 1)[1].split("\n    options {", 1)[0]
+        self.assertEqual(
+            re.findall(r"name:\s*'([^']+)'", block),
+            [
+                "ai_excutor",
+                "PROJECT_ID",
+                "dev_repository",
+                "SOURCE_BRANCH",
+                "MR_IID",
+                "TARGET_BRANCH",
+            ],
         )
+        self.assertIn("name: 'ai_excutor',\n            defaultValue: 'cc'", block)
+        self.assertIn("name: 'TARGET_BRANCH',\n            defaultValue: 'master'", block)
 
-    def test_deepseek_protocol_matrix_is_explicit(self):
-        self.assertIn("baseUrl = 'https://api.deepseek.com/anthropic'", self.text)
-        self.assertIn("protocol = 'anthropic'", self.text)
-        self.assertIn("protocol = 'openai_responses'", self.text)
-        self.assertIn("protocol = 'openai_chat'", self.text)
+    def test_gateway_configuration_is_not_a_build_parameter(self):
+        block = self.text.split("    parameters {", 1)[1].split("\n    options {", 1)[0]
+        for name in (
+            "AI_EXECUTOR",
+            "AI_GATEWAY_RESPONSES_URL",
+            "AI_GATEWAY_ANTHROPIC_URL",
+            "AI_GATEWAY_CHAT_URL",
+            "AI_OPENCODE_PROTOCOL",
+            "AI_MODEL",
+            "AI_AUTH_STYLE",
+            "AI_CREDENTIAL_ID",
+        ):
+            self.assertNotIn(f"name: '{name}'", block)
 
-    def test_selected_executor_and_protocol_are_injected(self):
+    def test_gateway_route_is_resolved_before_credentials(self):
+        resolver = self.text.index("python -u -m utils.resolve_ai_gateway")
+        credentials = self.text.index("credentialsId: credentialId", resolver)
+        self.assertLess(resolver, credentials)
+        self.assertIn("gatewayRoute.size() != 5", self.text)
+
+    def test_short_executor_codes_are_mapped_and_injected(self):
+        self.assertIn("def executorNames = [cc: 'claude', cx: 'codex', oc: 'opencode']", self.text)
+        self.assertIn("params.ai_excutor", self.text)
         self.assertIn('"AI_EXECUTOR=${executor}"', self.text)
         self.assertIn('"AI_API_PROTOCOL=${protocol}"', self.text)
-        self.assertNotIn("'AI_EXECUTOR=claude'", self.text)
 
     def test_cli_paths_and_versions_are_logged_before_credentials(self):
         checkout = self.text.index("stage('checkout')")

@@ -13,13 +13,14 @@
 //test 2026/9/24 18:00
 //test 2026/9/24 18:02
 //test 2026/9/24 18:07
+//test 2026/10/8 10:15
 ## Jenkins 构建进度
 
 此流水线使用三个阶段作为 Jenkins 任务主页的进度列：`checkout`（识别 MR、检出、查重）、`ai review`（预合并、准备 diff、AI 审查）、`report`（发布 GitLab 评审结果、失败通知及产物归档）。前两个阶段失败后仍会进入 `report`，并保留失败时的具体步骤名。每次构建占一行，构建编号、当前阶段的进度条和阶段用时由 Jenkins 的 **Pipeline: Stage View** 插件显示；运行中刷新任务主页即可查看更新。
 
-GitLab 触发时，MR 标识依次取自 Jenkins GitLab 插件变量、[原始 Webhook 接收入口](docs/webhook-receiver.md)传入的参数、GitLab API 的唯一匹配查询。无法唯一定位时停止回写，避免评论写错 MR。手动构建不回写失败通知；未提供 MR 标识的手动构建使用本地 Git diff。
+GitLab 插件触发时，仓库、项目、MR 和分支优先取自插件环境变量，不依赖手动构建参数；缺少 MR 标识时再通过 GitLab API 做唯一匹配查询。无法唯一定位时停止回写，避免评论写错 MR。[原始 Webhook 接收入口](docs/webhook-receiver.md)会把同样的信息转换成精简后的手动参数。手动构建未提供项目 ID 和 MR IID 时不回写 GitLab，并使用本地 Git diff。
 
-在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。GitLab 插件入口需在 Jenkins 任务中启用 Comments 触发并设置 `/codereview` 匹配规则，同时在 GitLab Webhook 中启用评论事件。手动构建仍可用 `FORCE_REVIEW` 参数强制重新审查。构建日志中的 `Keyword comment detected` 和 `Bypass completed-review check` 显示本次是否识别为评论触发并跳过查重。
+在 MR 评论 `/codereview` 触发的构建会重新审查，即使该提交已经审查完成；普通 MR 事件继续按提交 SHA 查重。GitLab 插件入口需在 Jenkins 任务中启用 Comments 触发并设置 `/codereview` 匹配规则，同时在 GitLab Webhook 中启用评论事件。手动构建本身即代表明确重审，因此自动跳过已完成审查查重。构建日志中的 `Keyword comment detected` 和 `Bypass completed-review check` 显示本次判断。
 
 GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新最多尝试 3 次，每次请求超时 10 秒；429 遵守不超过 10 秒的 `Retry-After`，超过当场重试预算就停止。失败评论使用 Jenkins `BUILD_TAG` 作为隐藏标识；POST 失败后先查询该 MR 是否已有本次构建的机器人评论，再决定是否重试。查询也失败时停止发布，避免盲目重复评论。401/403 和证书错误不重试；持续不可达时错误保留在 Jenkins 日志中，不进行恢复后的补发。
 
@@ -27,7 +28,9 @@ GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新
 
 开始通知使用同样的隐藏标识确认和安全重试。开始通知或 `ai_code_reviewing` 标签暂时无法写入时，流水线记录警告并继续 AI 审查；普通 MR 事件的完成查重查询仍必须成功，避免在无法确认历史状态时重复审查。
 
-AI 审查由 Jenkins Agent 上 npm 默认安装的 Claude Code、Codex CLI 或 OpenCode CLI 执行，构建参数 `AI_EXECUTOR` 默认选择 `claude`。`AI_PROVIDER=deepseek` 时，流水线按执行器自动选择 DeepSeek 官方 Anthropic、OpenAI Responses 或 OpenAI Chat 兼容接口，并使用现有 `deepseek-api-key`；`custom` 可连接其他兼容接口或部署在国内网络中的统一模型网关，并引用以 `ai-model-` 开头的专用 Jenkins Secret text 凭据。API Key 不进入普通参数、命令行或日志。调查阶段仅允许只读检索预合并工作区，最终阶段禁用工具；三个执行器共用 `review.schema.json`、本地校验和一次重试，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
+手动构建页面只显示 6 个字符串参数：`ai_excutor`（默认 `cc`，`cc/cx/oc` 分别代表 Claude Code、Codex、OpenCode）、`PROJECT_ID`、已填好默认值的 `dev_repository`、`SOURCE_BRANCH`、`MR_IID` 和默认 `master` 的 `TARGET_BRANCH`。模型地址、协议、模型名、鉴权方式和 Jenkins 凭据 ID 不再是构建参数，因此 Webhook 不会因这些参数没有传值而失败。
+
+AI 审查由 Jenkins Agent 上 npm 默认安装的三个 CLI 执行。隐藏配置默认沿用现有 DeepSeek 地址和 `deepseek-api-key`；管理员可在 Jenkins 全局、Folder 或 Job 环境中设置通用 `AI_GATEWAY_*` 配置，也可用 `AI_CLAUDE_*`、`AI_CODEX_*`、`AI_OPENCODE_*` 分别连接不同厂商。Codex 固定使用 OpenAI Responses，Claude Code 固定使用 Anthropic Messages，OpenCode 可选择 OpenAI Responses 或 Chat；厂商接口与所选 CLI 协议不一致时必须由外部网关转换。模型 API Key 不进入普通参数、命令行或日志。调查阶段仅允许只读检索预合并工作区，最终阶段禁用工具；三个执行器共用 `review.schema.json`、本地校验和一次重试，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
 
 若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
 
