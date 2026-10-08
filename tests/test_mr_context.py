@@ -141,7 +141,13 @@ class MrContextTests(unittest.TestCase):
             return Response()
 
         trigger_jenkins(
-            {"WEBHOOK_MR_IID": "12", "WEBHOOK_TARGET_PROJECT_ID": "5"},
+            {
+                "WEBHOOK_MR_IID": "12",
+                "WEBHOOK_TARGET_PROJECT_ID": "5",
+                "WEBHOOK_SOURCE_REPO_HTTP_URL": "https://gitlab.example/group/source.git",
+                "WEBHOOK_SOURCE_BRANCH": "feature/review",
+                "WEBHOOK_TARGET_BRANCH": "master",
+            },
             {"JENKINS_JOB_URL": "https://jenkins.example/job/review",
              "JENKINS_API_USER": "bot", "JENKINS_API_TOKEN": "token"},
             opener,
@@ -150,8 +156,15 @@ class MrContextTests(unittest.TestCase):
         self.assertEqual(timeout, 5)
         self.assertEqual(request.full_url, "https://jenkins.example/job/review/buildWithParameters")
         form = urllib.parse.parse_qs(request.data.decode("utf-8"))
-        self.assertEqual(form["WEBHOOK_MR_IID"], ["12"])
-        self.assertEqual(form["PUBLISH_COMMENT"], ["true"])
+        self.assertEqual(form["MR_IID"], ["12"])
+        self.assertEqual(form["PROJECT_ID"], ["5"])
+        self.assertEqual(
+            form["dev_repository"],
+            ["https://gitlab.example/group/source.git"],
+        )
+        self.assertEqual(form["SOURCE_BRANCH"], ["feature/review"])
+        self.assertEqual(form["TARGET_BRANCH"], ["master"])
+        self.assertNotIn("PUBLISH_COMMENT", form)
         authorization = request.get_header("Authorization").split(" ", 1)[1]
         self.assertEqual(base64.b64decode(authorization).decode(), "bot:token")
 

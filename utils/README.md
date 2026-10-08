@@ -28,34 +28,52 @@ Jenkins 只调用以下阶段入口；一个入口只完成一个流水线阶段
 
 ## AI CLI 执行器
 
-Jenkins 构建参数 `AI_EXECUTOR` 提供 `claude`、`codex`、`opencode` 三种 CLI，
-默认 `codex`。Agent 只需通过 npm 默认方式安装对应基础 CLI，不安装 LiteLLM、协议转换器
-或其他附加 CLI。OpenCode 会按自身标准机制按需缓存模型提供方运行包；流水线将缓存放在
+Jenkins 构建参数 `ai_excutor` 是字符串，默认 `cc`；`cc`、`cx`、`oc` 分别映射到
+`claude`、`codex`、`opencode` 三种 CLI。地址、协议、模型名、鉴权方式和凭据 ID 是 Jenkins
+管理员维护的隐藏环境配置，不出现在 Build with Parameters 页面。Agent 只需通过 npm 默认方式安装对应基础 CLI，不安装
+LiteLLM、协议转换器或其他附加 CLI。OpenCode 会按自身标准机制按需缓存模型提供方运行包；流水线将缓存放在
 Jenkins 工作区的 `.opencode-provider-cache`；若 Agent 管理员预设 `OPENCODE_CACHE_HOME`，
 则优先使用该目录以便跨构建复用。国内或企业网络需要 npm 镜像时，由 Agent 管理员设置
 `OPENCODE_NPM_REGISTRY`，执行器会将它传给 OpenCode 的包管理过程。
 
-| 执行器 | DeepSeek 自动协议 | custom 可用协议 | 结构化输出 |
+| 执行器 | 网关协议 | URL 参数 | 结构化输出 |
 | --- | --- | --- | --- |
-| `claude` | Anthropic Messages | `anthropic` | CLI `--json-schema` + 本地 Schema |
-| `codex` | OpenAI Responses | `openai_responses` | CLI `--output-schema` + 本地 Schema |
-| `opencode` | OpenAI Chat | `openai_chat`、`openai_responses` | 严格 JSON 提示词 + 本地 Schema |
+| `claude` | Anthropic Messages | `AI_GATEWAY_ANTHROPIC_URL` | CLI `--json-schema` + 本地 Schema |
+| `codex` | OpenAI Responses | `AI_GATEWAY_RESPONSES_URL` | CLI `--output-schema` + 本地 Schema |
+| `opencode` | OpenAI Chat 或 Responses | `AI_GATEWAY_CHAT_URL` 或 `AI_GATEWAY_RESPONSES_URL` | 严格 JSON 提示词 + 本地 Schema |
 
-`AI_PROVIDER=deepseek`（默认）会根据执行器自动选择 `https://api.deepseek.com/anthropic`
-或 `https://api.deepseek.com`，默认模型为 `deepseek-flash[1m]`。
-`AI_PROVIDER=custom` 使用 `AI_BASE_URL`、`AI_MODEL` 和 `AI_API_PROTOCOL` 接入其他厂商的
-兼容接口，或部署在国内网络中的统一模型网关。不兼容所选 CLI 的协议会在调用模型前失败，
-不会静默切换执行器或回退旧 API 流程。
+没有隐藏配置时，三个执行器自动沿用现有 DeepSeek 地址、模型和 `deepseek-api-key`：Claude
+使用 Anthropic 兼容地址，Codex 使用 Responses 兼容地址，OpenCode 使用 Chat 兼容地址。
+因此手动或 Webhook 构建不会再因网关参数为空而在调用 CLI 前失败。新增或替换 DeepSeek、
+千问、豆包、Kimi、GLM、Gemini、Grok、OpenAI 或其他模型时，可修改网关路由或 Jenkins
+隐藏环境配置，不修改构建参数。
+`utils.resolve_ai_gateway` 会在读取凭据前根据执行器选择协议和 URL，并拒绝 HTTP、内嵌凭据、
+查询参数、片段、控制字符和不支持的执行器/协议组合。它只输出非密钥配置。
 
-DeepSeek 固定使用现有 Jenkins Secret text 凭据 `deepseek-api-key`。`custom` 模式必须填写
-`AI_BASE_URL`、`AI_MODEL` 和以 `ai-model-` 开头的专用 `AI_CREDENTIAL_ID`，并通过
-`AI_AUTH_STYLE` 选择 Bearer 或 `x-api-key` 鉴权。构建参数只保存凭据 ID，API Key 本身由
-Jenkins Credentials 在执行阶段注入，不能填写到普通构建参数中；凭据命名空间限制可以避免
-自定义地址误用 GitLab 等与模型无关的 Jenkins 凭据。
+自定义 `AI_CREDENTIAL_ID` 必须以 `ai-model-` 开头；现有默认凭据 `deepseek-api-key` 作为兼容例外。
+`AI_AUTH_STYLE` 选择 Bearer 或 `x-api-key`；OpenCode 当前只允许 Bearer。隐藏环境配置只保存
+凭据 ID，访问密钥由 Jenkins Credentials 在执行阶段注入，不能填写到普通构建参数中。凭据命名
+空间限制可以避免误用 GitLab 等凭据。
+
+通用隐藏环境变量如下；不设置即使用上述默认值：
+
+```text
+AI_GATEWAY_RESPONSES_URL=https://gateway.example.com/v1
+AI_GATEWAY_ANTHROPIC_URL=https://gateway.example.com/anthropic
+AI_GATEWAY_CHAT_URL=https://gateway.example.com/v1
+AI_OPENCODE_PROTOCOL=openai_responses
+AI_MODEL=企业网关中的模型别名
+AI_AUTH_STYLE=bearer
+AI_CREDENTIAL_ID=ai-model-gateway-key
+```
+
+不同执行器需要不同模型、鉴权或凭据时，分别设置 `AI_CLAUDE_MODEL`、`AI_CODEX_MODEL`、
+`AI_OPENCODE_MODEL`，以及对应的 `AI_<执行器>_AUTH_STYLE` 和
+`AI_<执行器>_CREDENTIAL_ID`；专用值优先于通用值。三个 URL 按协议分别配置。
 
 Python 入口未设置 `AI_EXECUTOR` 时仍默认 `claude`；当前还接受 `deepseek`，仅兼容旧的
 直接 API 调用和人工排障，不再由 Jenkins 正常流水线使用。三个 CLI 都从 `AI_API_KEY`
-读取 Jenkins 注入的密钥，并使用 `AI_BASE_URL`、`AI_MODEL_OVERRIDE`、`AI_API_PROTOCOL`
+读取 Jenkins 注入的网关密钥，并使用解析后的 `AI_BASE_URL`、`AI_MODEL_OVERRIDE`、`AI_API_PROTOCOL`
 和 `AI_AUTH_STYLE`。Claude 支持 Bearer 与 `x-api-key`；Codex 支持 Responses 协议下的
 Bearer 与 `x-api-key`；OpenCode 的 OpenAI 兼容提供方当前要求 Bearer。
 
@@ -76,6 +94,7 @@ stderr 一并脱敏后写入失败日志，模型发起的 shell 命令则明确
 生成进程正常退出、输出通过本地 `review.schema.json` 校验后才会写入 `review-result.json`
 供发布阶段使用。结构化输出的一次重试也计入同一个截止时间和保险丝。
 
-只提供 OpenAI Chat Completions/Responses 或私有协议、且不兼容 Anthropic Messages 的模型
-不能由基础 Claude Code CLI 直接调用；此类模型需把 `AI_BASE_URL` 指向国内统一网关，由网关
-完成协议转换。网关不安装在 Jenkins Agent 上。
+若要通过同一个网关切换全部三个执行器，网关必须同时提供完整的 Responses 和 Anthropic
+Messages 兼容路径；若 OpenCode 选择 Chat，还需提供 Chat Completions 路径。仅能返回普通文本或仅实现 `/models` 的代理不满足要求：
+Responses 路径必须正确转发 SSE、工具调用与结果、连续轮次和终止事件。网关不安装在 Jenkins
+Agent 上，且模型路由是否真正支持工具调用仍需对每个上游模型做一次在线验收。

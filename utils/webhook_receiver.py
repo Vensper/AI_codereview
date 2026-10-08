@@ -28,7 +28,14 @@ def trigger_jenkins(context, environ=None, opener=urllib.request.urlopen):
     if urllib.parse.urlsplit(job_url).scheme not in {"http", "https"} or not user or not token:
         raise RuntimeError("Jenkins job URL or API credentials are not configured.")
     credentials = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
-    data = urllib.parse.urlencode({**context, "PUBLISH_COMMENT": "true"}).encode("utf-8")
+    parameters = {
+        "PROJECT_ID": context.get("WEBHOOK_TARGET_PROJECT_ID", ""),
+        "dev_repository": context.get("WEBHOOK_SOURCE_REPO_HTTP_URL", ""),
+        "SOURCE_BRANCH": context.get("WEBHOOK_SOURCE_BRANCH", ""),
+        "MR_IID": context.get("WEBHOOK_MR_IID", ""),
+        "TARGET_BRANCH": context.get("WEBHOOK_TARGET_BRANCH", "master"),
+    }
+    data = urllib.parse.urlencode(parameters).encode("utf-8")
     request = urllib.request.Request(
         job_url + "/buildWithParameters", data=data, method="POST",
         headers={
