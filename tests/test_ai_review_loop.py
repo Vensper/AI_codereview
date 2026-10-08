@@ -6,9 +6,11 @@ from utils.ai_review import (
     chat_messages_to_responses,
     load_review_schema,
     parse_review_with_retry,
+    run_cli_review,
     run_review_loop,
     validate_review_text,
 )
+from utils.ai_executors.base import ExecutionBudget, ReviewDeadline
 
 
 def tool_message(count=1):
@@ -49,6 +51,94 @@ def structured_response(value):
 
 
 class ReviewLoopTests(unittest.TestCase):
+    def test_cli_investigation_failure_still_writes_trace_and_closes_executor(self):
+        class FailingExecutor:
+            def __init__(self):
+                self.closed = False
+
+            def investigate(self, *_args, **_kwargs):
+                raise RuntimeError("investigation failed")
+
+            def get_trace(self):
+                return [{"phase": "investigation", "status": "error"}]
+
+            def close(self):
+                self.closed = True
+
+        executor = FailingExecutor()
+        with patch("utils.ai_review.write_json") as write_json:
+            with self.assertRaisesRegex(RuntimeError, "investigation failed"):
+                run_cli_review(
+                    executor,
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+
+        write_json.assert_called_once_with(
+            "ai-tool-trace.json",
+            [{"phase": "investigation", "status": "error"}],
+        )
+        self.assertTrue(executor.closed)
+
+    def test_cli_close_failure_does_not_hide_original_review_error(self):
+        class FailingExecutor:
+            def investigate(self, *_args, **_kwargs):
+                raise RuntimeError("original review error")
+
+            def get_trace(self):
+                return []
+
+            def close(self):
+                raise RuntimeError("close error")
+
+        with patch(
+            "utils.ai_review.write_json", side_effect=RuntimeError("trace write error")
+        ), patch("utils.ai_review.print"):
+            with self.assertRaisesRegex(RuntimeError, "original review error"):
+                run_cli_review(
+                    FailingExecutor(),
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+
+    def test_cli_trace_failure_is_fatal_after_an_otherwise_successful_review(self):
+        class SuccessfulExecutor:
+            def __init__(self):
+                self.closed = False
+
+            def investigate(self, *_args, **_kwargs):
+                return "draft"
+
+            def finalize(self, *_args, **_kwargs):
+                return json.dumps(review_value())
+
+            def get_trace(self):
+                return [{"phase": "finalization", "status": "ok"}]
+
+            def close(self):
+                self.closed = True
+
+        executor = SuccessfulExecutor()
+        with patch("utils.ai_review.write_text"), patch(
+            "utils.ai_review.write_json", side_effect=RuntimeError("trace write error")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "trace write error"):
+                run_cli_review(
+                    executor,
+                    r"C:\worktree",
+                    "review this diff",
+                    load_review_schema(),
+                    ReviewDeadline(),
+                    ExecutionBudget(),
+                )
+        self.assertTrue(executor.closed)
+
     def test_tool_transcript_is_translated_for_responses_api(self):
         messages = [
             {"role": "system", "content": "system"},
@@ -148,7 +238,7 @@ class ReviewLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be blank"):
             validate_review_text(json.dumps(value), load_review_schema())
 
-    def test_tool_round_limit_stops_before_unconstrained_final_call(self):
+    def test_model_round_fuse_stops_investigation(self):
         choices = []
 
         def request(payload, _key):
@@ -159,9 +249,16 @@ class ReviewLoopTests(unittest.TestCase):
         with patch("utils.ai_review.deepseek_request", side_effect=request), patch(
             "utils.ai_review.agent_tools.execute_tool_call", return_value={"status": "ok"}
         ) as execute, patch("utils.ai_review.agent_tools.append_tool_trace"):
-            self.assertEqual(run_review_loop(payload, "test-key"), "")
-        self.assertEqual(choices, ["auto"] * 8)
-        self.assertEqual(execute.call_count, 8)
+            self.assertEqual(
+                run_review_loop(
+                    payload,
+                    "test-key",
+                    budget=ExecutionBudget(max_rounds=3),
+                ),
+                "",
+            )
+        self.assertEqual(choices, ["auto"] * 3)
+        self.assertEqual(execute.call_count, 3)
 
     def test_excess_calls_in_last_batch_get_replies_without_execution(self):
         choices = []
@@ -171,12 +268,17 @@ class ReviewLoopTests(unittest.TestCase):
             return tool_message(2)
 
         payload = {"messages": [], "tool_choice": "auto"}
-        with patch("utils.ai_review.MAX_TOOL_CALLS", 1), patch(
-            "utils.ai_review.deepseek_request", side_effect=request
-        ), patch(
+        with patch("utils.ai_review.deepseek_request", side_effect=request), patch(
             "utils.ai_review.agent_tools.execute_tool_call", return_value={"status": "ok"}
         ) as execute, patch("utils.ai_review.agent_tools.append_tool_trace") as trace:
-            self.assertEqual(run_review_loop(payload, "test-key"), "")
+            self.assertEqual(
+                run_review_loop(
+                    payload,
+                    "test-key",
+                    budget=ExecutionBudget(max_tool_calls=1),
+                ),
+                "",
+            )
         self.assertEqual(choices, ["auto"])
         execute.assert_called_once()
         self.assertEqual(trace.call_args_list[-1].args[-1]["error_code"], "tool_budget_exhausted")

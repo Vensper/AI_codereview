@@ -51,6 +51,41 @@ pipeline {
             defaultValue: false,
             description: '仅测试用：跳过 GitLab API diff，验证本地 Git diff 兜底路径。正式 Webhook 构建保持 false。'
         )
+        choice(
+            name: 'AI_EXECUTOR',
+            choices: ['claude', 'codex', 'opencode'],
+            description: 'AI CLI 执行器。默认 Claude Code；也可选择 Codex CLI 或 OpenCode CLI。'
+        )
+        choice(
+            name: 'AI_PROVIDER',
+            choices: ['deepseek', 'custom'],
+            description: '模型服务。deepseek 根据执行器自动选择国内官方兼容接口；custom 用于其他兼容接口或国内统一网关。'
+        )
+        choice(
+            name: 'AI_API_PROTOCOL',
+            choices: ['auto', 'anthropic', 'openai_responses', 'openai_chat'],
+            description: '接口协议。deepseek 使用 auto；custom 的 auto 会采用所选执行器的默认协议，也可显式指定。'
+        )
+        string(
+            name: 'AI_BASE_URL',
+            defaultValue: '',
+            description: 'AI_PROVIDER=custom 时必填，填写与所选协议兼容的 HTTPS 根地址；deepseek 时忽略。'
+        )
+        string(
+            name: 'AI_MODEL',
+            defaultValue: '',
+            description: '模型名称。deepseek 留空时使用 deepseek-flash[1m]；custom 必填。'
+        )
+        choice(
+            name: 'AI_AUTH_STYLE',
+            choices: ['bearer', 'api_key'],
+            description: 'custom 接口鉴权方式：bearer 对应 Authorization: Bearer，api_key 对应 x-api-key；deepseek 时固定 bearer。'
+        )
+        string(
+            name: 'AI_CREDENTIAL_ID',
+            defaultValue: 'ai-model-custom-api-key',
+            description: '仅 custom 使用：以 ai-model- 开头的 Jenkins Secret text 凭据 ID。只填写凭据 ID，不要填写 API Key。'
+        )
     }
 
     options {
@@ -62,6 +97,23 @@ pipeline {
     stages {
         stage('checkout') {
             steps {
+                bat '''
+                    @echo off
+                    echo AI CLI diagnostics:
+                    where codex
+                    if errorlevel 1 (
+                        echo codex executable: not found
+                    ) else (
+                        codex --version
+                    )
+                    where opencode
+                    if errorlevel 1 (
+                        echo opencode executable: not found
+                    ) else (
+                        opencode --version
+                    )
+                    exit /b 0
+                '''
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     script {
                         env.REVIEW_SKIP = 'false'
@@ -171,7 +223,7 @@ pipeline {
                     dir('review-tool') {
                         checkout([
                             $class: 'GitSCM',
-                            branches: [[name: 'refs/heads/codex/jenkins-stage-view']],
+                            branches: [[name: 'refs/heads/codex/multi-excutor']],
                             userRemoteConfigs: [[
                                 url: 'https://gitlab.i-soft.com.cn/sao/ph-sao-qc-jjfa-2026.git',
                                 credentialsId: 'gitlab-project-read'
@@ -384,18 +436,102 @@ pipeline {
                             }
                         }
                     }
-                    script { env.REVIEW_FAILURE_STAGE = 'AI 审查' }
-                    dir('review-tool') {
-                        withCredentials([
-                            string(
-                                credentialsId: 'deepseek-api-key',
-                                variable: 'DEEPSEEK_API_KEY'
-                            )
-                        ]) {
-                            bat '''
-                                @echo off
-                                python -u -m utils.ai_review "../mr-premerge"
-                            '''
+                    script {
+                        env.REVIEW_FAILURE_STAGE = '配置 AI 执行器'
+
+                        def executor = params.AI_EXECUTOR?.trim()?.toLowerCase()
+                        def provider = params.AI_PROVIDER?.trim()?.toLowerCase()
+                        def baseUrl = ''
+                        def model = params.AI_MODEL?.trim()
+                        def protocol = params.AI_API_PROTOCOL?.trim()?.toLowerCase()
+                        def authStyle = params.AI_AUTH_STYLE?.trim()?.toLowerCase()
+                        def credentialId = ''
+                        def opencodeCacheHome = env.OPENCODE_CACHE_HOME?.trim() ?: "${env.WORKSPACE}\\.opencode-provider-cache"
+
+                        if (!(executor in ['claude', 'codex', 'opencode'])) {
+                            error("不支持的 AI_EXECUTOR：${executor ?: '(empty)'}。")
+                        }
+
+                        if (provider == 'deepseek') {
+                            model = model ?: 'deepseek-flash[1m]'
+                            authStyle = 'bearer'
+                            credentialId = 'deepseek-api-key'
+                            if (executor == 'claude') {
+                                baseUrl = 'https://api.deepseek.com/anthropic'
+                                protocol = 'anthropic'
+                            } else if (executor == 'codex') {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_responses'
+                            } else {
+                                baseUrl = 'https://api.deepseek.com'
+                                protocol = 'openai_chat'
+                            }
+                        } else if (provider == 'custom') {
+                            baseUrl = params.AI_BASE_URL?.trim()
+                            credentialId = params.AI_CREDENTIAL_ID?.trim()
+                            if (!baseUrl) {
+                                error('AI_PROVIDER=custom 时必须填写 AI_BASE_URL。')
+                            }
+                            if (!model) {
+                                error('AI_PROVIDER=custom 时必须填写 AI_MODEL。')
+                            }
+                            if (!(authStyle in ['bearer', 'api_key'])) {
+                                error('AI_AUTH_STYLE 只能是 bearer 或 api_key。')
+                            }
+                            if (!(credentialId ==~ /^ai-model-[A-Za-z0-9._-]+$/)) {
+                                error('custom 的 AI_CREDENTIAL_ID 必须以 ai-model- 开头，且只能包含字母、数字、点、下划线和连字符。')
+                            }
+                            if (protocol == 'auto') {
+                                if (executor == 'claude') {
+                                    protocol = 'anthropic'
+                                } else if (executor == 'codex') {
+                                    protocol = 'openai_responses'
+                                } else {
+                                    protocol = 'openai_chat'
+                                }
+                            }
+                        } else {
+                            error("不支持的 AI_PROVIDER：${provider ?: '(empty)'}。")
+                        }
+
+                        def supportedProtocols = [
+                            claude: ['anthropic'],
+                            codex: ['openai_responses'],
+                            opencode: ['openai_chat', 'openai_responses']
+                        ]
+                        if (!(protocol in supportedProtocols[executor])) {
+                            error("AI_EXECUTOR=${executor} 不支持 AI_API_PROTOCOL=${protocol}；允许值：${supportedProtocols[executor].join(', ')}。")
+                        }
+                        if (executor == 'opencode' && authStyle != 'bearer') {
+                            error('OpenCode 的 OpenAI 兼容提供方当前只支持 AI_AUTH_STYLE=bearer。')
+                        }
+
+                        if (!(baseUrl ==~ /^https:\/\/[^\s?#]+\/?$/)) {
+                            error('AI_BASE_URL 必须是无查询参数、无片段的 HTTPS 地址。')
+                        }
+                        echo "AI executor=${executor}; provider=${provider}; protocol=${protocol}; model=${model}; auth=${authStyle}; endpoint=${baseUrl}"
+                        env.REVIEW_FAILURE_STAGE = 'AI 审查'
+                        dir('review-tool') {
+                            withCredentials([
+                                string(
+                                    credentialsId: credentialId,
+                                    variable: 'AI_API_KEY'
+                                )
+                            ]) {
+                                withEnv([
+                                    "AI_EXECUTOR=${executor}",
+                                    "AI_BASE_URL=${baseUrl}",
+                                    "AI_MODEL_OVERRIDE=${model}",
+                                    "AI_API_PROTOCOL=${protocol}",
+                                    "AI_AUTH_STYLE=${authStyle}",
+                                    "OPENCODE_CACHE_HOME=${opencodeCacheHome}"
+                                ]) {
+                                    bat '''
+                                        @echo off
+                                        python -u -m utils.ai_review "../mr-premerge"
+                                    '''
+                                }
+                            }
                         }
                     }
                 }
@@ -469,14 +605,14 @@ pipeline {
                                             '''
                                         }
                                     } else {
-                                        // 失败回写脚本尚不可用时，直接调用 GitLab API。
-                                        def reportableStages = [
-                                            '识别 MR', '检出审查工具', '检出 MR 源分支', '获取源提交 SHA',
-                                            '发送开始通知', '准备预合并工作区', '获取 GitLab MR diff',
-                                            '生成本地 Git 兜底 diff', 'AI 审查', '发布审查结果', '归档审查产物'
-                                        ]
-                                        def stageName = reportableStages.contains(env.REVIEW_FAILURE_STAGE) ?
-                                            env.REVIEW_FAILURE_STAGE : '未知阶段'
+                                        // 启动兜底：review-tool 尚未成功检出时 Python reporter 不可用。
+                                        // REVIEW_FAILURE_STAGE 只由本 Jenkinsfile 设置；这里只做长度和换行校验，
+                                        // 避免再维护一份容易漂移的阶段白名单。
+                                        def stageName = env.REVIEW_FAILURE_STAGE?.trim()
+                                        if (!stageName || stageName.length() > 40 ||
+                                            stageName.contains('\r') || stageName.contains('\n')) {
+                                            stageName = '未知阶段'
+                                        }
                                         def buildLink = env.BUILD_URL?.trim() ?: '请查看 Jenkins 构建记录'
                                         env.REVIEW_FAILURE_NOTE = "AI代码审核失败。\n\n" +
                                             "- 失败阶段：${stageName}\n" +

@@ -1,6 +1,5 @@
-import os
-
 from utils.common import (
+    force_review_requested,
     has_completed_review,
     post_review_start_note,
     publishing_context,
@@ -12,16 +11,7 @@ from utils.common import (
 
 
 def bypass_completed_review_check():
-    if any(
-        os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
-        for name in ("FORCE_REVIEW", "REVIEW_BYPASS_DEDUP")
-    ):
-        return True
-    return (
-        os.environ.get("WEBHOOK_EVENT_KIND", "").strip().lower() == "note"
-        or os.environ.get("gitlabActionType", "").strip().upper() == "NOTE"
-        or os.environ.get("gitlabTriggerPhrase", "").strip() == "/codereview"
-    )
+    return force_review_requested()
 
 
 def main():
@@ -36,10 +26,18 @@ def main():
     if not force_review and has_completed_review(
         base_url, token, project_id, mr_iid, source_sha
     ):
+        update_mr_labels(
+            base_url,
+            token,
+            project_id,
+            mr_iid,
+            add=["ai_code_review_done"],
+            remove=["ai_code_reviewing", "ai_code_review_failed"],
+        )
         write_text("review-skip.flag", "already-completed\n")
         print(
-            "Review deduplication: completed review exists for "
-            f"source SHA {source_sha}; skip requested."
+            "Review deduplication: completed review exists and MR labels were "
+            f"reconciled for source SHA {source_sha}; skip requested."
         )
         return
 

@@ -4,6 +4,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
+import utils.report_review_failure as failure_reporter
 from utils.common import (
     GitLabAPIError,
     GitLabPublicationUncertainError,
@@ -27,6 +28,51 @@ class Response:
 
 
 class GitLabFailureReportingTests(unittest.TestCase):
+    def test_failure_reporter_accepts_executor_configuration_stage(self):
+        self.assertEqual(
+            failure_reporter.normalize_failure_stage("配置 AI 执行器"),
+            "配置 AI 执行器",
+        )
+
+    def test_failure_reporter_rejects_multiline_or_oversized_stage(self):
+        self.assertEqual(
+            failure_reporter.normalize_failure_stage("AI 审查\n伪造内容"),
+            "未知阶段",
+        )
+        self.assertEqual(
+            failure_reporter.normalize_failure_stage("x" * 41),
+            "未知阶段",
+        )
+
+    def test_failure_reporter_updates_label_and_posts_sanitized_note(self):
+        environment = {
+            "REVIEW_FAILURE_STAGE": "配置 AI 执行器",
+            "BUILD_URL": "https://jenkins.example/job/review/8/",
+            "BUILD_TAG": "jenkins-review-8",
+        }
+        with patch.dict(failure_reporter.os.environ, environment, clear=True), patch(
+            "utils.report_review_failure.publishing_enabled", return_value=True
+        ), patch(
+            "utils.report_review_failure.publishing_context",
+            return_value=("https://gitlab.example", "token", "5", "12"),
+        ), patch(
+            "utils.report_review_failure.update_mr_labels"
+        ) as update_labels, patch(
+            "utils.report_review_failure.post_failure_note"
+        ) as post_note:
+            failure_reporter.main()
+
+        update_labels.assert_called_once_with(
+            "https://gitlab.example",
+            "token",
+            "5",
+            "12",
+            add=["ai_code_review_failed"],
+            remove=["ai_code_reviewing", "ai_code_review_done"],
+        )
+        self.assertIn("失败阶段：配置 AI 执行器", post_note.call_args.args[4])
+        self.assertEqual(post_note.call_args.args[5], "jenkins-review-8")
+
     def test_get_retries_transient_http_error(self):
         unavailable = urllib.error.HTTPError("url", 503, "unavailable", {}, None)
         with patch("utils.common.urllib.request.urlopen", side_effect=[unavailable, Response({"id": 1})]) as open_url, patch("utils.common.time.sleep") as sleep:
