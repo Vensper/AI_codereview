@@ -30,7 +30,7 @@ GitLab API 短时超时、连接中断、429 或 5xx 时，读取和标签更新
 
 手动构建页面只显示 6 个字符串参数：`ai_excutor`（默认 `cc`，`cc/cx/oc` 分别代表 Claude Code、Codex、OpenCode）、`PROJECT_ID`、已填好默认值的 `dev_repository`、`SOURCE_BRANCH`、`MR_IID` 和默认 `master` 的 `TARGET_BRANCH`。模型地址、协议、模型名、鉴权方式和 Jenkins 凭据 ID 不再是构建参数，因此 Webhook 不会因这些参数没有传值而失败。
 
-AI 审查由 Jenkins Agent 上 npm 默认安装的三个 CLI 执行。隐藏配置默认沿用现有 DeepSeek 地址和 `deepseek-api-key`；管理员可在 Jenkins 全局、Folder 或 Job 环境中设置 `AI_GATEWAY_*`、`AI_MODEL`、`AI_AUTH_STYLE` 和 `AI_CREDENTIAL_ID`，也可使用每个执行器的专用覆盖值。Codex 固定使用 OpenAI Responses，Claude Code 固定使用 Anthropic Messages，OpenCode 可选择 OpenAI Responses 或 Chat。模型 API Key 不进入普通参数、命令行或日志。调查阶段仅允许只读检索预合并工作区，最终阶段禁用工具；三个执行器共用 `review.schema.json`、本地校验和一次重试，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
+AI 审查由 Jenkins Agent 上 npm 默认安装的三个 CLI 执行。隐藏配置默认沿用现有 DeepSeek 地址和 `deepseek-api-key`；管理员可在 Jenkins 全局、Folder 或 Job 环境中设置通用 `AI_GATEWAY_*` 配置，也可用 `AI_CLAUDE_*`、`AI_CODEX_*`、`AI_OPENCODE_*` 分别连接不同厂商。Codex 固定使用 OpenAI Responses，Claude Code 固定使用 Anthropic Messages，OpenCode 可选择 OpenAI Responses 或 Chat；厂商接口与所选 CLI 协议不一致时必须由外部网关转换。模型 API Key 不进入普通参数、命令行或日志。调查阶段仅允许只读检索预合并工作区，最终阶段禁用工具；三个执行器共用 `review.schema.json`、本地校验和一次重试，第二次仍失败则停止发布评审内容并进入 GitLab 失败回写。
 
 若任务主页没有 Stage View，请在 Jenkins 的插件管理中安装 `pipeline-stage-view`，然后打开对应 Pipeline 任务的主页或 **Full Stage View**。插件默认显示最近 10 次构建；要显示更多历史构建，需由 Jenkins 管理员调整 `com.cloudbees.workflow.rest.external.JobExt.maxRunsPerJob`。跳过重复审查时，`ai review` 显示为跳过，`report` 仍执行产物归档；前两个阶段失败时，`report` 仍执行失败通知和产物归档。
 

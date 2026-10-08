@@ -61,7 +61,7 @@ class AiGatewayRouteTests(unittest.TestCase):
         expected = {
             "claude": ("anthropic", "https://api.deepseek.com/anthropic", "deepseek-flash[1m]"),
             "codex": ("openai_responses", "https://api.deepseek.com", "deepseek-flash"),
-            "opencode": ("openai_chat", "https://api.deepseek.com", "deepseek-flash[1m]"),
+            "opencode": ("openai_chat", "https://api.deepseek.com", "deepseek-flash"),
         }
         for executor, values in expected.items():
             with self.subTest(executor=executor):
@@ -75,14 +75,58 @@ class AiGatewayRouteTests(unittest.TestCase):
     def test_executor_specific_hidden_values_override_common_values(self):
         route = resolve_gateway_route(
             self.environment(
+                AI_CODEX_BASE_URL="https://codex-gateway.example/responses",
                 AI_CODEX_MODEL="codex-route",
                 AI_CODEX_AUTH_STYLE="api_key",
                 AI_CODEX_CREDENTIAL_ID="ai-model-codex-key",
             )
         )
+        self.assertEqual(
+            route.base_url, "https://codex-gateway.example/responses"
+        )
         self.assertEqual(route.model, "codex-route")
         self.assertEqual(route.auth_style, "api_key")
         self.assertEqual(route.credential_id, "ai-model-codex-key")
+
+    def test_each_executor_can_use_an_independent_compatible_api(self):
+        cases = [
+            (
+                "claude",
+                "AI_CLAUDE_BASE_URL",
+                "https://models.example/anthropic",
+                "AI_CLAUDE_MODEL",
+                "qwen-coder-anthropic",
+                "anthropic",
+            ),
+            (
+                "codex",
+                "AI_CODEX_BASE_URL",
+                "https://models.example/v1",
+                "AI_CODEX_MODEL",
+                "gpt-coding-route",
+                "openai_responses",
+            ),
+            (
+                "opencode",
+                "AI_OPENCODE_BASE_URL",
+                "https://models.example/openai/v1",
+                "AI_OPENCODE_MODEL",
+                "kimi-coding-route",
+                "openai_chat",
+            ),
+        ]
+        for executor, url_name, url, model_name, model, protocol in cases:
+            with self.subTest(executor=executor):
+                route = resolve_gateway_route(
+                    {
+                        "AI_EXECUTOR": executor,
+                        url_name: url,
+                        model_name: model,
+                    }
+                )
+                self.assertEqual(route.base_url, url)
+                self.assertEqual(route.model, model)
+                self.assertEqual(route.protocol, protocol)
 
     def test_rejects_http_credentials_query_and_control_characters(self):
         invalid_urls = [

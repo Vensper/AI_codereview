@@ -31,7 +31,7 @@ DEFAULT_ROUTES = {
     "opencode": {
         "protocol": "openai_chat",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-flash[1m]",
+        "model": "deepseek-flash",
     },
 }
 DEFAULT_AUTH_STYLE = "bearer"
@@ -128,7 +128,12 @@ def resolve_gateway_route(environ=None):
 
     url_env = PROTOCOL_URL_ENV[protocol]
     base_url = _validate_https_base_url(
-        _configured(environ, url_env, default=defaults["base_url"]),
+        _configured(
+            environ,
+            f"{executor_prefix}_BASE_URL",
+            url_env,
+            default=defaults["base_url"],
+        ),
         url_env,
     )
     model = _validate_model(

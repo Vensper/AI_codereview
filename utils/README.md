@@ -36,14 +36,15 @@ Jenkins 工作区的 `.opencode-provider-cache`；若 Agent 管理员预设 `OPE
 则优先使用该目录以便跨构建复用。国内或企业网络需要 npm 镜像时，由 Agent 管理员设置
 `OPENCODE_NPM_REGISTRY`，执行器会将它传给 OpenCode 的包管理过程。
 
-| 执行器 | 网关协议 | URL 参数 | 结构化输出 |
-| --- | --- | --- | --- |
-| `claude` | Anthropic Messages | `AI_GATEWAY_ANTHROPIC_URL` | CLI `--json-schema` + 本地 Schema |
-| `codex` | OpenAI Responses | `AI_GATEWAY_RESPONSES_URL` | CLI `--output-schema` + 本地 Schema |
-| `opencode` | OpenAI Chat 或 Responses | `AI_GATEWAY_CHAT_URL` 或 `AI_GATEWAY_RESPONSES_URL` | 严格 JSON 提示词 + 本地 Schema |
+| 执行器 | 必须兼容的协议 | 执行器专用 URL | 共用 URL 兜底 | 结构化输出 |
+| --- | --- | --- | --- | --- |
+| `claude` | Anthropic Messages | `AI_CLAUDE_BASE_URL` | `AI_GATEWAY_ANTHROPIC_URL` | CLI `--json-schema` + 本地 Schema |
+| `codex` | OpenAI Responses | `AI_CODEX_BASE_URL` | `AI_GATEWAY_RESPONSES_URL` | CLI `--output-schema` + 本地 Schema |
+| `opencode` | OpenAI Chat 或 Responses | `AI_OPENCODE_BASE_URL` | `AI_GATEWAY_CHAT_URL` 或 `AI_GATEWAY_RESPONSES_URL` | 严格 JSON 提示词 + 本地 Schema |
 
 没有隐藏配置时，三个执行器自动沿用现有 DeepSeek 地址、模型和 `deepseek-api-key`：Claude
-使用 Anthropic 兼容地址，Codex 使用 Responses 兼容地址，OpenCode 使用 Chat 兼容地址。
+使用 Anthropic 兼容地址；Codex 和 OpenCode 都使用服务端支持的 `deepseek-flash`，分别访问
+Responses 与 Chat 兼容地址。
 因此手动或 Webhook 构建不会再因网关参数为空而在调用 CLI 前失败。新增或替换 DeepSeek、
 千问、豆包、Kimi、GLM、Gemini、Grok、OpenAI 或其他模型时，可修改网关路由或 Jenkins
 隐藏环境配置，不修改构建参数。
@@ -67,9 +68,17 @@ AI_AUTH_STYLE=bearer
 AI_CREDENTIAL_ID=ai-model-gateway-key
 ```
 
-不同执行器需要不同模型、鉴权或凭据时，分别设置 `AI_CLAUDE_MODEL`、`AI_CODEX_MODEL`、
-`AI_OPENCODE_MODEL`，以及对应的 `AI_<执行器>_AUTH_STYLE` 和
-`AI_<执行器>_CREDENTIAL_ID`；专用值优先于通用值。三个 URL 按协议分别配置。
+不同执行器需要连接不同厂商时，分别设置 `AI_CLAUDE_BASE_URL`、`AI_CODEX_BASE_URL`、
+`AI_OPENCODE_BASE_URL`，并设置 `AI_CLAUDE_MODEL`、`AI_CODEX_MODEL`、
+`AI_OPENCODE_MODEL` 及对应的 `AI_<执行器>_AUTH_STYLE`、
+`AI_<执行器>_CREDENTIAL_ID`；执行器专用值优先于通用值。
+
+“支持同一种主流 API 格式”不等于三个 CLI 可以互换协议。Claude Code 的目标地址必须实现
+Anthropic Messages；Codex 的目标地址必须完整实现 Responses（包括流式事件、工具调用及工具
+结果）；OpenCode 可使用 Chat Completions 或 Responses。只有 Chat 接口的豆包、Kimi、千问、
+GLM、Grok、Gemini 等 API 可以由 OpenCode 直接连接；若要交给 Claude Code 或 Codex，必须由
+外部统一网关分别转换成 Anthropic Messages 或 Responses。项目本身不在 Jenkins Agent 内做
+协议转换。
 
 Python 入口未设置 `AI_EXECUTOR` 时仍默认 `claude`；当前还接受 `deepseek`，仅兼容旧的
 直接 API 调用和人工排障，不再由 Jenkins 正常流水线使用。三个 CLI 都从 `AI_API_KEY`
