@@ -29,7 +29,7 @@ Jenkins 只调用以下阶段入口；一个入口只完成一个流水线阶段
 ## AI CLI 执行器
 
 Jenkins 构建参数 `AI_EXECUTOR` 提供 `claude`、`codex`、`opencode` 三种 CLI，
-默认 `claude`。Agent 只需通过 npm 默认方式安装对应基础 CLI，不安装 LiteLLM、协议转换器
+默认 `codex`。Agent 只需通过 npm 默认方式安装对应基础 CLI，不安装 LiteLLM、协议转换器
 或其他附加 CLI。OpenCode 会按自身标准机制按需缓存模型提供方运行包；流水线将缓存放在
 Jenkins 工作区的 `.opencode-provider-cache`；若 Agent 管理员预设 `OPENCODE_CACHE_HOME`，
 则优先使用该目录以便跨构建复用。国内或企业网络需要 npm 镜像时，由 Agent 管理员设置
@@ -65,6 +65,10 @@ XDG 配置/数据/缓存/状态目录、最高优先级内联配置、`--pure` �
 只允许 Read、Glob、Grep，最终阶段禁用全部工具。为规避仓库自带插件在部分 OpenCode 版本
 中的加载风险，预合并根目录存在 `opencode.json`、`opencode.jsonc` 或 `.opencode` 时，
 OpenCode 执行器会明确失败，用户可选择 Claude/Codex 或移除该配置后再审查。
+
+Codex 的临时 `CODEX_HOME` 创建在 Jenkins 工作区而不是系统 `TEMP` 下，以便 Windows 版
+Codex 安全创建 PATH helper；执行结束后自动删除。Codex JSONL 输出中的结构化错误会与
+stderr 一并脱敏后写入失败日志，模型发起的 shell 命令则明确排除 `AI_API_KEY`。
 
 每次 AI 审查共用一个 600 秒单调时钟截止时间：调查阶段最多 480 秒，进入最终生成后
 最多再使用 120 秒，且不能越过总截止时间。64 个可观测模型轮次和 128 次可观测工具调用

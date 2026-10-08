@@ -10,9 +10,9 @@ class JenkinsAiParameterTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = JENKINSFILE.read_text(encoding="utf-8")
 
-    def test_claude_is_first_executor_choice(self):
+    def test_codex_is_first_executor_choice(self):
         self.assertIn(
-            "name: 'AI_EXECUTOR',\n            choices: ['claude', 'codex', 'opencode']",
+            "name: 'AI_EXECUTOR',\n            choices: ['codex', 'claude', 'opencode']",
             self.text,
         )
 

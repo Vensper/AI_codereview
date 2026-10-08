@@ -53,8 +53,8 @@ pipeline {
         )
         choice(
             name: 'AI_EXECUTOR',
-            choices: ['claude', 'codex', 'opencode'],
-            description: 'AI CLI 执行器。默认 Claude Code；也可选择 Codex CLI 或 OpenCode CLI。'
+            choices: ['codex', 'claude', 'opencode'],
+            description: 'AI CLI 执行器。默认 Codex CLI；也可选择 Claude Code 或 OpenCode CLI。'
         )
         choice(
             name: 'AI_PROVIDER',

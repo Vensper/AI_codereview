@@ -28,6 +28,7 @@ class _CodexStreamObserver:
         self.turn_seen = False
         self.seen_tool_calls = set()
         self.messages = {}
+        self.errors = []
 
     def __call__(self, line):
         try:
@@ -38,6 +39,10 @@ class _CodexStreamObserver:
             return
 
         event_type = str(event.get("type") or "")
+        if event_type in {"error", "turn.failed"}:
+            message = self._error_message(event)
+            if message and message not in self.errors:
+                self.errors.append(message)
         if event_type == "turn.started" and not self.turn_seen:
             self.turn_seen = True
             self.budget.consume_round()
@@ -57,6 +62,25 @@ class _CodexStreamObserver:
 
     def text(self):
         return "\n".join(self.messages.values()).strip()
+
+    def error_text(self):
+        return "\n".join(self.errors).strip()
+
+    @staticmethod
+    def _error_message(event):
+        message = event.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+        error = event.get("error")
+        if isinstance(error, str):
+            return error.strip()
+        if not isinstance(error, dict):
+            return ""
+        message = error.get("message")
+        if isinstance(message, str):
+            return message.strip()
+        return ""
 
 
 class CodexCliExecutor:
@@ -94,6 +118,8 @@ class CodexCliExecutor:
             "analytics.enabled=false",
             "agents.enabled=false",
             'model_reasoning_summary="none"',
+            "shell_environment_policy.ignore_default_excludes=false",
+            'shell_environment_policy.filters.AI_API_KEY="exclude"',
         ]
         if settings.auth_style == "bearer":
             values.append('model_providers.jenkins.env_key="AI_API_KEY"')
@@ -138,7 +164,16 @@ class CodexCliExecutor:
     def _run(self, prompt, workspace, timeout_seconds, budget, schema=None):
         settings = self._settings()
         observer = _CodexStreamObserver(budget)
-        with tempfile.TemporaryDirectory(prefix="ai-review-codex-") as runtime_home:
+        runtime_root = (
+            self.environ.get("CODEX_RUNTIME_ROOT", "").strip()
+            or self.environ.get("WORKSPACE", "").strip()
+            or os.getcwd()
+        )
+        runtime_root = os.path.abspath(runtime_root)
+        os.makedirs(runtime_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".ai-review-codex-", dir=runtime_root
+        ) as runtime_home:
             schema_path = None
             if schema is not None:
                 schema_path = os.path.join(runtime_home, "review.schema.json")
@@ -153,12 +188,21 @@ class CodexCliExecutor:
                 timeout_seconds=timeout_seconds,
                 stdout_line_callback=observer,
             )
-        return completed, observer.text(), secrets
+        return completed, observer.text(), observer.error_text(), secrets
+
+    @staticmethod
+    def _failure_detail(completed, observed_error, secrets):
+        raw_detail = "\n".join(
+            value
+            for value in (completed.stderr.strip(), observed_error)
+            if value
+        )
+        return redact(raw_detail, secrets)[-2000:]
 
     def investigate(self, prompt, workspace, timeout_seconds, budget):
         started = time.monotonic()
         try:
-            completed, text, secrets = self._run(
+            completed, text, observed_error, secrets = self._run(
                 prompt, workspace, timeout_seconds, budget
             )
         except OSError as exc:
@@ -171,10 +215,10 @@ class CodexCliExecutor:
         elif completed.monitor_error is not None:
             raise RuntimeError(f"Cannot monitor Codex CLI output: {completed.monitor_error}")
         elif completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            detail = self._failure_detail(completed, observed_error, secrets)
             raise RuntimeError(
                 f"Codex CLI investigation exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
+                f"{detail or 'no error output'}"
             )
         else:
             status = "ok"
@@ -194,7 +238,7 @@ class CodexCliExecutor:
     def finalize(self, prompt, workspace, schema, timeout_seconds, budget, attempt=0):
         started = time.monotonic()
         try:
-            completed, text, secrets = self._run(
+            completed, text, observed_error, secrets = self._run(
                 prompt, workspace, timeout_seconds, budget, schema=schema
             )
         except OSError as exc:
@@ -221,10 +265,10 @@ class CodexCliExecutor:
         if completed.monitor_error is not None:
             raise completed.monitor_error
         if completed.returncode != 0:
-            detail = redact(completed.stderr.strip(), secrets)[-2000:]
+            detail = self._failure_detail(completed, observed_error, secrets)
             raise RuntimeError(
                 f"Codex CLI finalization exited with code {completed.returncode}: "
-                f"{detail or 'no stderr output'}"
+                f"{detail or 'no error output'}"
             )
         if not text:
             raise ValueError("Codex CLI returned no structured output.")

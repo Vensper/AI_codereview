@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -75,6 +77,15 @@ class CodexCliExecutorTests(unittest.TestCase):
         kwargs = run_process.call_args.kwargs
         self.assertEqual(kwargs["env"]["AI_API_KEY"], "top-secret")
         self.assertNotIn("DEEPSEEK_API_KEY", kwargs["env"])
+        runtime_home = kwargs["env"]["CODEX_HOME"]
+        self.assertEqual(
+            os.path.commonpath([runtime_home, os.getcwd()]),
+            os.getcwd(),
+        )
+        self.assertNotEqual(
+            os.path.commonpath([runtime_home, tempfile.gettempdir()]),
+            tempfile.gettempdir(),
+        )
 
     @patch("utils.ai_executors.codex_cli.run_process")
     @patch(
@@ -122,6 +133,18 @@ class CodexCliExecutorTests(unittest.TestCase):
         )
         self.assertNotIn("top-secret", " ".join(values))
 
+    def test_shell_environment_excludes_api_key(self):
+        executor = CodexCliExecutor(environ=self.environment())
+        values = executor._provider_config(executor._settings())
+        self.assertIn(
+            "shell_environment_policy.ignore_default_excludes=false",
+            values,
+        )
+        self.assertIn(
+            'shell_environment_policy.filters.AI_API_KEY="exclude"',
+            values,
+        )
+
     def test_rejects_non_responses_protocol(self):
         executor = CodexCliExecutor(
             environ=self.environment(AI_API_PROTOCOL="openai_chat")
@@ -143,6 +166,32 @@ class CodexCliExecutorTests(unittest.TestCase):
             executor.finalize(
                 "prompt", r"C:\worktree", SCHEMA, 120, ExecutionBudget()
             )
+
+    @patch("utils.ai_executors.codex_cli.run_process")
+    @patch(
+        "utils.ai_executors.codex_cli.shutil.which",
+        return_value=r"C:\bin\codex.cmd",
+    )
+    def test_nonzero_exit_reports_structured_stdout_error(
+        self, _which, run_process
+    ):
+        def completed(*_args, **kwargs):
+            kwargs["stdout_line_callback"](json.dumps({
+                "type": "error",
+                "message": "request rejected for top-secret",
+            }))
+            return ProcessResult(1, "", "temporary helper warning")
+
+        run_process.side_effect = completed
+        executor = CodexCliExecutor(environ=self.environment())
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"request rejected for \*\*\*",
+        ) as raised:
+            executor.investigate(
+                "prompt", r"C:\worktree", 120, ExecutionBudget()
+            )
+        self.assertIn("temporary helper warning", str(raised.exception))
 
 
 if __name__ == "__main__":
